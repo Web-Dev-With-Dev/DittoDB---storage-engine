@@ -109,18 +109,16 @@ Page *BufferPoolManager::FetchPage(page_id_t page_id) {
         return nullptr;
     }
 
-    // 1. Check if the page is already in the buffer pool (or currently being loaded)
     while (true) {
+        // 1. Fast Path: Check if page is already in the buffer pool (cache hit)
         auto it = page_table_.find(page_id);
         if (it != page_table_.end()) {
             frame_id_t frame_id = it->second;
             Page &page = pages_[frame_id];
 
-            // If another thread is currently performing I/O on this frame,
-            // wait on io_cv_ with latch_ released.
+            // If this frame is currently undergoing writeback flush, wait briefly
             if (frame_io_in_progress_[frame_id]) {
                 io_cv_.wait(lock, [&]() { return !frame_io_in_progress_[frame_id]; });
-                // Re-evaluate in case I/O failed and frame was unmapped
                 continue;
             }
 
@@ -129,28 +127,53 @@ Page *BufferPoolManager::FetchPage(page_id_t page_id) {
             replacer_->SetEvictable(frame_id, false);
             return &page;
         }
+
+        // 2. Singleflight Path: Check if another thread is ALREADY loading this page from disk
+        auto flight_it = in_flight_loads_.find(page_id);
+        if (flight_it != in_flight_loads_.end()) {
+            std::shared_ptr<InFlightLoad> load = flight_it->second;
+
+            // Follower thread: release global BPM latch and wait for the leader's disk I/O to finish
+            lock.unlock();
+
+            std::unique_lock<std::mutex> load_lock(load->mtx);
+            load->cv.wait(load_lock, [&]() { return load->done; });
+            load_lock.unlock();
+
+            // Re-acquire global BPM latch to check result in page_table_
+            lock.lock();
+
+            if (!load->success) {
+                if (load->error) {
+                    std::rethrow_exception(load->error);
+                }
+                return nullptr;
+            }
+
+            // Loop back to verify cache hit in page_table_
+            continue;
+        }
+
+        // 3. Leader Path: This thread initiates the single in-flight load for page_id
         break;
     }
 
-    // 2. Page miss: find and reserve an available frame
+    // Allocate frame for the new page
     frame_id_t frame_id;
     if (!FindAvailableFrame(&frame_id, lock)) {
         return nullptr;
     }
 
-    // 3. Frame Reservation: map page_id -> frame_id in page_table_ BEFORE reading from disk!
+    // Register this in-flight load in the Singleflight table
+    auto load = std::make_shared<InFlightLoad>();
+    load->frame_id = frame_id;
+    in_flight_loads_[page_id] = load;
+
     Page &page = pages_[frame_id];
     page.SetPageId(page_id);
     page.SetDirty(false);
-    page.Pin();
-    page_table_[page_id] = frame_id;
-    replacer_->RecordAccess(frame_id);
-    replacer_->SetEvictable(frame_id, false);
 
-    // Mark frame as having I/O in progress
-    frame_io_in_progress_[frame_id] = true;
-
-    // Acquire write latch on the page buffer
+    // Acquire page write latch during disk read
     page.WLatch();
 
     // 4. Release global BPM latch during disk read!
@@ -165,20 +188,35 @@ Page *BufferPoolManager::FetchPage(page_id_t page_id) {
         ex = std::current_exception();
     }
 
-    // Release page write latch
     page.WUnlatch();
 
-    // 5. Re-acquire global BPM latch to clear I/O flag and notify waiting threads
+    // 5. Re-acquire global BPM latch to commit or rollback
     lock.lock();
-    frame_io_in_progress_[frame_id] = false;
-    io_cv_.notify_all();
 
-    if (!read_success) {
-        page_table_.erase(page_id);
+    if (read_success) {
+        page.Pin();
+        page_table_[page_id] = frame_id;
+        replacer_->RecordAccess(frame_id);
+        replacer_->SetEvictable(frame_id, false);
+    } else {
         page.SetPageId(INVALID_PAGE_ID);
         page.SetDirty(false);
-        page.Unpin();
         free_list_.push_back(frame_id);
+    }
+
+    // Remove from in_flight_loads_ table
+    in_flight_loads_.erase(page_id);
+
+    // Wake up all follower threads waiting on this singleflight load
+    {
+        std::lock_guard<std::mutex> load_lock(load->mtx);
+        load->done = true;
+        load->success = read_success;
+        load->error = ex;
+        load->cv.notify_all();
+    }
+
+    if (!read_success) {
         if (ex) {
             std::rethrow_exception(ex);
         }
@@ -261,6 +299,11 @@ Page *BufferPoolManager::NewPage(page_id_t *page_id) {
 
 bool BufferPoolManager::DeletePage(page_id_t page_id) {
     std::unique_lock<std::mutex> lock(latch_);
+
+    // If an in-flight load is pending, page cannot be deleted
+    if (in_flight_loads_.find(page_id) != in_flight_loads_.end()) {
+        return false;
+    }
 
     auto it = page_table_.find(page_id);
     if (it == page_table_.end()) {

@@ -173,7 +173,20 @@ private:
     // Concurrency control for BufferPoolManager metadata
     mutable std::mutex latch_;
 
-    // Frame reservation & per-frame I/O synchronization (PostgreSQL / InnoDB model)
+    // In-Flight Page-Load Coordinator (Singleflight Pattern)
+    struct InFlightLoad {
+        std::mutex mtx;
+        std::condition_variable cv;
+        bool done{false};
+        bool success{false};
+        frame_id_t frame_id{INVALID_FRAME_ID};
+        std::exception_ptr error{nullptr};
+    };
+
+    // In-Flight Page-Load Table: tracks unbuffered pages currently being read from disk
+    std::unordered_map<page_id_t, std::shared_ptr<InFlightLoad>> in_flight_loads_;
+
+    // Per-frame flush I/O tracking to synchronize concurrent write-backs
     std::vector<bool> frame_io_in_progress_;
     std::condition_variable io_cv_;
 };
