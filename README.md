@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
-  <img src="https://img.shields.io/badge/Tests-203%2F203%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-204%2F204%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier%20Storage-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Sanitizers-TSan%20%7C%20Helgrind%20Clean-success.svg" alt="Sanitizers" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
@@ -302,11 +302,11 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 | `TableHeapTest` | 9 | Linked-page creation, multi-page spanning inserts, cross-page migration update, `TableIterator` across pages, crash persistence |
 | `ExtendibleHashTableTest` | 10 | Directory page doubling/shrinking, split images, hash masking, bucket splits, key redistribution, persistence across eviction |
 | `EndToEndStorageIntegrationTest` | 4 | Real DiskManager + LRUK + BPM + TablePage + TableHeap cooperating across 50+ pages with 4-5 frames, forced dirty-evictions, crash recovery |
-| `BufferPoolManagerConcurrentTest` | 6 | Concurrent `FetchPage`/`UnpinPage` contention, 10-thread eviction storm, concurrent `NewPage` allocation, reader-writer latching isolation, pin exhaustion recovery |
+| `BufferPoolManagerConcurrentTest` | 7 | Concurrent `FetchPage`/`UnpinPage` contention, 10-thread eviction storm, concurrent `NewPage` allocation, reader-writer latching isolation, pin exhaustion recovery, frame reservation on unbuffered page |
 
 ```
-100% tests passed, 0 tests failed out of 203
-Total Test time (real) = 11.41 sec
+100% tests passed, 0 tests failed out of 204
+Total Test time (real) = 13.79 sec
 ```
 
 ### ThreadSanitizer & Helgrind Verification

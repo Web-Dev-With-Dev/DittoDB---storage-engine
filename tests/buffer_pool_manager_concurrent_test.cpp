@@ -603,3 +603,59 @@ TEST_F(BufferPoolManagerConcurrentTest, MixedConcurrentLifecycleStress) {
     // After storm, FlushAllPages must run cleanly and all frames should be intact
     EXPECT_NO_THROW(bpm.FlushAllPages());
 }
+
+// ============================================================================
+// Test 7: Frame Reservation - Concurrent Fetch of Same Unbuffered Page
+// Verifies that when N threads concurrently request an unbuffered page,
+// only 1 frame is reserved, all threads receive the exact same Page* pointer,
+// no duplicate disk frames are allocated, and pin count matches N.
+// ============================================================================
+TEST_F(BufferPoolManagerConcurrentTest, FrameReservationConcurrentFetchSamePage) {
+    const size_t pool_size = 5;
+    BufferPoolManager bpm(pool_size, disk_manager_.get());
+
+    // Write a page directly to disk using DiskManager so it exists on storage
+    page_id_t target_pid = disk_manager_->AllocatePage();
+    char disk_data[PAGE_SIZE] = {};
+    std::snprintf(disk_data, PAGE_SIZE, "Frame Reservation Test Data Payload");
+    disk_manager_->WritePage(target_pid, disk_data);
+
+    // Ensure it is not currently in the buffer pool
+    ASSERT_FALSE(bpm.IsPageInPool(target_pid));
+
+    const int num_threads = 8;
+    std::vector<Page *> fetched_pages(num_threads, nullptr);
+    StartGate gate;
+    std::vector<std::thread> threads;
+
+    for (int i = 0; i < num_threads; ++i) {
+        threads.emplace_back([&, i]() {
+            gate.Wait();
+            fetched_pages[i] = bpm.FetchPage(target_pid);
+        });
+    }
+
+    gate.Open();
+    for (auto &t : threads) {
+        t.join();
+    }
+
+    // Every thread must have successfully fetched the page
+    for (int i = 0; i < num_threads; ++i) {
+        ASSERT_NE(fetched_pages[i], nullptr);
+        EXPECT_EQ(fetched_pages[i], fetched_pages[0]) << "Thread " << i << " received a different frame!";
+        EXPECT_STREQ("Frame Reservation Test Data Payload", fetched_pages[i]->GetData());
+    }
+
+    // Pin count must exactly equal the number of concurrent requesters
+    EXPECT_EQ(fetched_pages[0]->GetPinCount(), num_threads);
+    EXPECT_TRUE(bpm.IsPageInPool(target_pid));
+
+    // All threads unpin
+    for (int i = 0; i < num_threads; ++i) {
+        EXPECT_TRUE(bpm.UnpinPage(target_pid, false));
+    }
+
+    // Pin count should now be 0, making frame evictable
+    EXPECT_EQ(fetched_pages[0]->GetPinCount(), 0);
+}

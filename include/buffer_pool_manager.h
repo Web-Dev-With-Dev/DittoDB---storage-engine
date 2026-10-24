@@ -1,5 +1,6 @@
 #pragma once
 
+#include <condition_variable>
 #include <cstddef>
 #include <list>
 #include <memory>
@@ -149,8 +150,10 @@ private:
     /**
      * @brief Find an available frame from the free list or via LRU-K eviction.
      * @param[out] frame_id Output pointer to receive the acquired frame index.
+     * @param lock Reference to the active unique_lock on latch_ (may be unlocked during dirty victim flush).
      * @return true if an available frame was found; false if all frames are pinned.
      */
+    bool FindAvailableFrame(frame_id_t *frame_id, std::unique_lock<std::mutex> &lock);
     bool FindAvailableFrame(frame_id_t *frame_id);
 
     size_t pool_size_;
@@ -169,5 +172,9 @@ private:
 
     // Concurrency control for BufferPoolManager metadata
     mutable std::mutex latch_;
+
+    // Frame reservation & per-frame I/O synchronization (PostgreSQL / InnoDB model)
+    std::vector<bool> frame_io_in_progress_;
+    std::condition_variable io_cv_;
 };
 
