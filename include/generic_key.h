@@ -153,29 +153,57 @@ public:
 
     template <typename T>
     static void Serialize(const T &val, char *dest, size_t dest_size) {
-        if constexpr (std::is_same_v<T, int32_t>) {
-            assert(dest_size >= sizeof(int32_t));
-            SerializeInt32(val, dest);
-            if (dest_size > sizeof(int32_t)) {
-                std::memset(dest + sizeof(int32_t), 0, dest_size - sizeof(int32_t));
+        if constexpr (std::is_same_v<T, bool>) {
+            assert(dest_size >= 1);
+            dest[0] = val ? static_cast<char>(1) : static_cast<char>(0);
+            if (dest_size > 1) {
+                std::memset(dest + 1, 0, dest_size - 1);
             }
-        } else if constexpr (std::is_same_v<T, uint32_t>) {
-            assert(dest_size >= sizeof(uint32_t));
-            SerializeUint32(val, dest);
-            if (dest_size > sizeof(uint32_t)) {
-                std::memset(dest + sizeof(uint32_t), 0, dest_size - sizeof(uint32_t));
-            }
-        } else if constexpr (std::is_same_v<T, int64_t>) {
-            assert(dest_size >= sizeof(int64_t));
-            SerializeInt64(val, dest);
-            if (dest_size > sizeof(int64_t)) {
-                std::memset(dest + sizeof(int64_t), 0, dest_size - sizeof(int64_t));
-            }
-        } else if constexpr (std::is_same_v<T, uint64_t>) {
-            assert(dest_size >= sizeof(uint64_t));
-            SerializeUint64(val, dest);
-            if (dest_size > sizeof(uint64_t)) {
-                std::memset(dest + sizeof(uint64_t), 0, dest_size - sizeof(uint64_t));
+        } else if constexpr (std::is_integral_v<T>) {
+            if constexpr (sizeof(T) == 1) {
+                assert(dest_size >= 1);
+                if constexpr (std::is_signed_v<T>) {
+                    uint8_t u = static_cast<uint8_t>(val) ^ 0x80u;
+                    dest[0] = static_cast<char>(u);
+                } else {
+                    dest[0] = static_cast<char>(val);
+                }
+                if (dest_size > 1) {
+                    std::memset(dest + 1, 0, dest_size - 1);
+                }
+            } else if constexpr (sizeof(T) == 2) {
+                assert(dest_size >= 2);
+                uint16_t u = static_cast<uint16_t>(val);
+                if constexpr (std::is_signed_v<T>) {
+                    u ^= 0x8000u;
+                }
+                dest[0] = static_cast<char>((u >> 8) & 0xFF);
+                dest[1] = static_cast<char>(u & 0xFF);
+                if (dest_size > 2) {
+                    std::memset(dest + 2, 0, dest_size - 2);
+                }
+            } else if constexpr (sizeof(T) == 4) {
+                assert(dest_size >= 4);
+                if constexpr (std::is_signed_v<T>) {
+                    SerializeInt32(static_cast<int32_t>(val), dest);
+                } else {
+                    SerializeUint32(static_cast<uint32_t>(val), dest);
+                }
+                if (dest_size > 4) {
+                    std::memset(dest + 4, 0, dest_size - 4);
+                }
+            } else if constexpr (sizeof(T) == 8) {
+                assert(dest_size >= 8);
+                if constexpr (std::is_signed_v<T>) {
+                    SerializeInt64(static_cast<int64_t>(val), dest);
+                } else {
+                    SerializeUint64(static_cast<uint64_t>(val), dest);
+                }
+                if (dest_size > 8) {
+                    std::memset(dest + 8, 0, dest_size - 8);
+                }
+            } else {
+                static_assert(sizeof(T) <= 8, "Unsupported integer size for KeySerializer");
             }
         } else if constexpr (std::is_same_v<T, float>) {
             assert(dest_size >= sizeof(float));
@@ -204,14 +232,40 @@ public:
 
     template <typename T>
     static T Deserialize(const char *src, size_t src_size) {
-        if constexpr (std::is_same_v<T, int32_t>) {
-            return DeserializeInt32(src);
-        } else if constexpr (std::is_same_v<T, uint32_t>) {
-            return DeserializeUint32(src);
-        } else if constexpr (std::is_same_v<T, int64_t>) {
-            return DeserializeInt64(src);
-        } else if constexpr (std::is_same_v<T, uint64_t>) {
-            return DeserializeUint64(src);
+        if constexpr (std::is_same_v<T, bool>) {
+            return src[0] != 0;
+        } else if constexpr (std::is_integral_v<T>) {
+            if constexpr (sizeof(T) == 1) {
+                if constexpr (std::is_signed_v<T>) {
+                    uint8_t u = static_cast<uint8_t>(src[0]) ^ 0x80u;
+                    return static_cast<T>(static_cast<int8_t>(u));
+                } else {
+                    return static_cast<T>(static_cast<uint8_t>(src[0]));
+                }
+            } else if constexpr (sizeof(T) == 2) {
+                uint16_t u = (static_cast<uint16_t>(static_cast<uint8_t>(src[0])) << 8) |
+                             (static_cast<uint16_t>(static_cast<uint8_t>(src[1])));
+                if constexpr (std::is_signed_v<T>) {
+                    u ^= 0x8000u;
+                    return static_cast<T>(static_cast<int16_t>(u));
+                } else {
+                    return static_cast<T>(u);
+                }
+            } else if constexpr (sizeof(T) == 4) {
+                if constexpr (std::is_signed_v<T>) {
+                    return static_cast<T>(DeserializeInt32(src));
+                } else {
+                    return static_cast<T>(DeserializeUint32(src));
+                }
+            } else if constexpr (sizeof(T) == 8) {
+                if constexpr (std::is_signed_v<T>) {
+                    return static_cast<T>(DeserializeInt64(src));
+                } else {
+                    return static_cast<T>(DeserializeUint64(src));
+                }
+            } else {
+                static_assert(sizeof(T) <= 8, "Unsupported integer size for KeySerializer");
+            }
         } else if constexpr (std::is_same_v<T, float>) {
             return DeserializeFloat(src);
         } else if constexpr (std::is_same_v<T, double>) {
