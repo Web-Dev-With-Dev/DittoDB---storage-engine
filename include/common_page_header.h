@@ -15,7 +15,8 @@ enum class PageType : uint32_t {
     BPLUS_TREE_INTERNAL_PAGE = 2,
     TABLE_PAGE = 3,
     HASH_TABLE_DIRECTORY_PAGE = 4,
-    HASH_TABLE_BUCKET_PAGE = 5
+    HASH_TABLE_BUCKET_PAGE = 5,
+    BPLUS_TREE_HEADER_PAGE = 6
 };
 
 /**

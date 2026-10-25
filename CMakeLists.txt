@@ -436,6 +436,29 @@ else()
     message(WARNING "generic_key_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/generic_key_test.cpp")
 endif()
 
+# 16. B+ Tree Header Page Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/b_plus_tree_header_page_test.cpp)
+    message(STATUS "Found b_plus_tree_header_page_test.cpp")
+    add_executable(b_plus_tree_header_page_test
+        tests/b_plus_tree_header_page_test.cpp
+    )
+    
+    target_link_libraries(b_plus_tree_header_page_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(b_plus_tree_header_page_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(b_plus_tree_header_page_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "b_plus_tree_header_page_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/b_plus_tree_header_page_test.cpp")
+endif()
+
 # ==================== Test Runner Targets ====================
 
 # Run LRU-K tests specifically
@@ -500,6 +523,9 @@ add_custom_target(run_all_tests
     COMMAND ${CMAKE_COMMAND} -E echo "15. Running Generic Key and Serialization Tests..."
     COMMAND ./generic_key_test || echo "Generic Key tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "16. Running B+ Tree Header Page Tests..."
+    COMMAND ./b_plus_tree_header_page_test || echo "B+ Tree Header Page tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
     COMMAND ${CMAKE_COMMAND} -E echo "All tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
@@ -519,6 +545,7 @@ add_custom_target(run_all_tests
         b_plus_tree_internal_page_test
         b_plus_tree_leaf_page_test
         generic_key_test
+        b_plus_tree_header_page_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running all tests"
 )
