@@ -390,6 +390,29 @@ else()
     message(WARNING "b_plus_tree_internal_page_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/b_plus_tree_internal_page_test.cpp")
 endif()
 
+# 14. B+ Tree Leaf Page Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/b_plus_tree_leaf_page_test.cpp)
+    message(STATUS "Found b_plus_tree_leaf_page_test.cpp")
+    add_executable(b_plus_tree_leaf_page_test
+        tests/b_plus_tree_leaf_page_test.cpp
+    )
+    
+    target_link_libraries(b_plus_tree_leaf_page_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(b_plus_tree_leaf_page_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(b_plus_tree_leaf_page_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "b_plus_tree_leaf_page_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/b_plus_tree_leaf_page_test.cpp")
+endif()
+
 # ==================== Test Runner Targets ====================
 
 # Run LRU-K tests specifically
@@ -448,6 +471,9 @@ add_custom_target(run_all_tests
     COMMAND ${CMAKE_COMMAND} -E echo "13. Running B+ Tree Internal Page Tests..."
     COMMAND ./b_plus_tree_internal_page_test || echo "B+ Tree Internal Page tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "14. Running B+ Tree Leaf Page Tests..."
+    COMMAND ./b_plus_tree_leaf_page_test || echo "B+ Tree Leaf Page tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
     COMMAND ${CMAKE_COMMAND} -E echo "All tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
@@ -465,6 +491,7 @@ add_custom_target(run_all_tests
         buffer_pool_manager_concurrent_test
         common_page_header_test
         b_plus_tree_internal_page_test
+        b_plus_tree_leaf_page_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running all tests"
 )
