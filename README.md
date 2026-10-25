@@ -29,6 +29,7 @@
   - [5. Slotted-Page Physical Storage (`TablePage`, `Tuple`, `RID`)](#5-slotted-page-physical-storage-tablepage-tuple-rid)
   - [6. Multi-Page Table Heap (`TableHeap`, `TableIterator`)](#6-multi-page-table-heap-tableheap-tableiterator)
   - [7. Buffer-Pool-Backed Hash Index (`ExtendibleHashTable`)](#7-buffer-pool-backed-hash-index-extendiblehashtable)
+  - [8. B+ Tree Index Node Architecture (`BPlusTreePage`, `BPlusTreeInternalPage`, `BPlusTreeLeafPage`, `BPlusTreeHeaderPage`)](#8-b-tree-index-node-architecture-bplustreepage-bplustreeinternalpage-bplustreeleafpage-bplustreeheaderpage)
 - [Key Engineering Trade-Offs](#key-engineering-trade-offs)
   - [Trade-off 1: Replacement Policy Selection (LRU vs. CLOCK vs. 2Q vs. LRU-K)](#trade-off-1-replacement-policy-selection-lru-vs-clock-vs-2q-vs-lru-k)
   - [Trade-off 2: Latching Granularity & Deadlock Avoidance Hierarchy](#trade-off-2-latching-granularity--deadlock-avoidance-hierarchy)
@@ -48,10 +49,11 @@ DittoDB is built on a clean, decoupled 5-tier architecture where each storage la
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ Tier 5: Tables & Dynamic Indexing                                           │
+│ Tier 5: Tables, Hashes, & B+ Tree Indexing                                  │
 │  - TableHeap: Doubly-linked chain of TablePages                             │
 │  - TableIterator: C++20 standard-compliant forward iterator across pages    │
 │  - ExtendibleHashTable: Buffer-pool-backed directory & bucket hash index    │
+│  - B+ Tree Pages: HeaderPage root tracker, InternalPage, & LeafPage nodes   │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ Tier 4: Records, Identifiers, & Slotted Pages                               │
 │  - TablePage: Dual-end growth slotted-page layout on 4096-byte raw Page     │
@@ -214,6 +216,117 @@ A disk-backed, buffer-pool-managed dynamic hash index:
 - **Directory Page:** Tracks global depth ($D$), local depths ($d_i$), and bucket page IDs.
 - **Bucket Pages:** Fixed-capacity array of key-value pairs with atomic insert, lookup, and removal.
 - **Dynamic Doubling & Splits:** When a bucket overflows, directory capacity doubles ($2^D \to 2^{D+1}$) without moving existing pages. The bucket splits, local depth increments, and entries redistribute across the split image.
+
+---
+
+### 8. B+ Tree Index Node Architecture (`BPlusTreePage`, `BPlusTreeInternalPage`, `BPlusTreeLeafPage`, `BPlusTreeHeaderPage`)
+- **Headers:** [`include/common_page_header.h`](include/common_page_header.h) · [`include/b_plus_tree_page.h`](include/b_plus_tree_page.h) · [`include/b_plus_tree_internal_page.h`](include/b_plus_tree_internal_page.h) · [`include/b_plus_tree_leaf_page.h`](include/b_plus_tree_leaf_page.h) · [`include/b_plus_tree_header_page.h`](include/b_plus_tree_header_page.h) · [`include/generic_key.h`](include/generic_key.h)
+
+DittoDB features an in-place B+ Tree index storage layer built directly on top of 4096-byte `Page` memory frames without dynamic heap allocations inside node blocks. All node types inherit from a shared 24-byte header enabling polymorphic type inspection, WAL logging, and zero-copy reinterpret casting:
+
+#### 1. Common Page Header Layout (24 Bytes)
+Shared binary header present at byte offset 0 across all B+ Tree node types:
+
+```
+Offset 0                                                                       Offset 24
+┌───────────────┬───────────────┬───────────────┬───────────────┬────────────────┬───────────────┐
+│ page_type_    │ lsn_          │ size_         │ max_size_     │ parent_page_id │ page_id_      │
+│ (4 Bytes)     │ (4 Bytes)     │ (4 Bytes)     │ (4 Bytes)     │ (4 Bytes)      │ (4 Bytes)     │
+└───────────────┴───────────────┴───────────────┴───────────────┴────────────────┴───────────────┘
+▲               ▲               ▲               ▲               ▲                ▲               ▲
+0               4               8               12              16               20              24
+```
+- **`page_type_` (4B):** Enum identifying `BPLUS_TREE_INTERNAL_PAGE` (2), `BPLUS_TREE_LEAF_PAGE` (3), or `BPLUS_TREE_HEADER_PAGE` (4).
+- **`lsn_` (4B):** Log Sequence Number reserved for Write-Ahead Logging (WAL) recovery.
+- **`size_` (4B):** Number of active valid entries currently stored in the node.
+- **`max_size_` (4B):** Maximum capacity before triggering node split ($N$).
+- **`parent_page_id_` (4B):** Pointer to parent internal node (`INVALID_PAGE_ID` for root).
+- **`page_id_` (4B):** Physical disk block identifier of this page.
+
+---
+
+#### 2. B+ Tree Internal Page Layout (Routing Node)
+Internal nodes guide tree traversal down to the target leaf. Stored as an array of `(Key, child_page_id_t)` pairs:
+
+```
+Offset 0                                                                               Offset 4096
+┌──────────────────────┬─────────────┬─────────────┬─────────────┬─────┬─────────────────────────┐
+│ CommonPageHeader     │ [Dummy, P0] │  [Key1, P1] │  [Key2, P2] │ ... │ [Key(N-1), P(N-1)]      │
+│ (24 Bytes)           │ Child 0 ptr │ Key1 | ptr1 │ Key2 | ptr2 │ ... │ Key(N-1) | ptr(N-1)     │
+└──────────────────────┴─────────────┴─────────────┴─────────────┴─────┴─────────────────────────┘
+▲                      ▲                                                                         ▲
+0                      24 (Entry Array `array_[]`)                                               4096
+
+Child Routing Invariant:
+       keys < Key1     ──► Follow Child P0
+Key1 ≤ keys < Key2     ──► Follow Child P1
+Key2 ≤ keys < Key3     ──► Follow Child P2
+       keys ≥ Key(N-1) ──► Follow Child P(N-1)
+```
+- **Dummy First Key:** `array_[0].first` is unmapped/ignored; `array_[0].second` holds pointer `P0` for all keys smaller than `Key1`.
+- **Fast Binary Search:** `Lookup(key)` performs binary search over `array_[1 .. size-1]` to determine the routing child pointer in $O(\log N)$ time.
+- **Insert-After Helper:** `InsertNodeAfter(old_value, new_key, new_value)` seamlessly splits and links new sibling pointers during child splits.
+
+---
+
+#### 3. B+ Tree Leaf Page Layout (Data Node)
+Leaf nodes store the indexed key-value payload `(Key, RID)` and form a singly-linked sequential scan chain:
+
+```
+Offset 0                                                                               Offset 4096
+┌──────────────────────┬──────────────┬─────────────┬─────────────┬─────────────┬───┬────────────┐
+│ CommonPageHeader     │ next_page_id │  [Key0, R0] │  [Key1, R1] │  [Key2, R2] │...│[Key(M), RM]│
+│ (24 Bytes)           │ (4B) + Pad4B │ Sorted pair │ Sorted pair │ Sorted pair │...│Sorted pair │
+└──────────────────────┴──────────────┴─────────────┴─────────────┴─────────────┴───┴────────────┘
+▲                      ▲              ▲                                                          ▲
+0                      24             32 (Aligned Entry Array `array_[]`)                        4096
+                                      │
+                                      ▼
+             Sequential Chain: Leaf Page ◄──next_page_id──► Next Leaf Page
+```
+- **Natural Alignment:** 4-byte padding follows `next_page_id_` so the entry array aligns cleanly on 8-byte boundaries for 64-bit keys and RIDs.
+- **Strict Key Ordering:** Entries are maintained in sorted order: $\text{Key}_0 < \text{Key}_1 < \dots < \text{Key}_{M-1}$.
+- **Linked Leaf Chain:** `next_page_id_` enables $O(1)$ page-to-page sequential iterator traversal across ranges without re-traversing internal nodes from the root.
+- **Sorted Insert & Search:** Binary search `KeyIndex()` and `Lookup()` execute in $O(\log M)$; `Insert()` shifts entries in-place and rejects duplicates.
+
+---
+
+#### 4. B+ Tree Header Page Layout (Root Persistence)
+A dedicated root tracking page that anchors the index on persistent storage:
+
+```
+Offset 0                                                                               Offset 4096
+┌──────────────────┬──────────────┬─────────────┬──────────────┬──────────┬──────────┬───────────┐
+│ CommonPageHeader │ root_page_id │ tree_depth_ │ record_count │ key_size │ val_size │ Reserved  │
+│ (24 Bytes)       │ (4 Bytes)    │ (4 Bytes)   │ (8 Bytes)    │ (4 Bytes)│ (4 Bytes)│ (4048 B)  │
+└──────────────────┴──────────────┴─────────────┴──────────────┴──────────┴──────────┴───────────┘
+▲                  ▲              ▲             ▲              ▲          ▲          ▲           ▲
+0                  24             28            32             40         44         48          4096
+```
+- **Root Tracking:** `root_page_id_` reliably stores the current root page ID (updated atomically during root splits and merges, or `INVALID_PAGE_ID` when empty).
+- **Restart Recovery:** Persisted via `BufferPoolManager` and `DiskManager` so index roots are accurately restored across engine crashes and restarts.
+- **Metadata Diagnostics:** Records `tree_depth_`, total indexed `record_count_`, and key/value sizes for schema validation.
+
+---
+
+#### 5. Complete Index Structure & Navigation Traversal
+
+```
+                               ┌────────────────────────────────────────┐
+                               │       Internal Node (Root: Page 10)    │
+                               │  Header: Type=Internal, Size=3, Ptr=-1 │
+                               │   [*, P1]   |   [50, P2]  |  [100, P3] │
+                               └───────┬────────────┬────────────┬──────┘
+                                       │            │            │
+                    ┌──────────────────┘            │            └──────────────────┐
+                    ▼                               ▼                               ▼
+       ┌────────────────────────┐      ┌────────────────────────┐      ┌────────────────────────┐
+       │   Leaf Node (Page 1)   │      │   Leaf Node (Page 2)   │      │   Leaf Node (Page 3)   │
+       │ NextPageId = 2         │─────►│ NextPageId = 3         │─────►│ NextPageId = -1        │
+       │ (10, R1)  |  (30, R2)  │      │ (50, R3)  |  (75, R4)  │      │ (100, R5) | (200, R6)  │
+       └────────────────────────┘      └────────────────────────┘      └────────────────────────┘
+       ◄─────────────────────────── Sequential Leaf Chain ($O(1)$ Range Scans) ─────────────────►
+```
 
 ---
 
