@@ -1,5 +1,4 @@
 #include "page.h"
-#include <new>
 
 Page::Page()
     : page_id_(INVALID_PAGE_ID),
@@ -46,34 +45,14 @@ const char *Page::GetData() const
     return data_.data();
 }
 
-CommonPageHeader *Page::GetHeader()
-{
-    return reinterpret_cast<CommonPageHeader *>(data_.data());
-}
-
-const CommonPageHeader *Page::GetHeader() const
-{
-    return reinterpret_cast<const CommonPageHeader *>(data_.data());
-}
-
 lsn_t Page::GetLSN() const
 {
-    return GetHeader()->GetLSN();
+    return *reinterpret_cast<const lsn_t *>(data_.data() + OFFSET_LSN);
 }
 
 void Page::SetLSN(lsn_t lsn)
 {
-    GetHeader()->SetLSN(lsn);
-}
-
-PageType Page::GetPageType() const
-{
-    return GetHeader()->GetPageType();
-}
-
-void Page::SetPageType(PageType type)
-{
-    GetHeader()->SetPageType(type);
+    *reinterpret_cast<lsn_t *>(data_.data() + OFFSET_LSN) = lsn;
 }
 
 void Page::ResetMemory()

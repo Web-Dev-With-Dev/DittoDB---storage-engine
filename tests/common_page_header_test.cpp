@@ -131,33 +131,31 @@ TEST_F(CommonPageHeaderTest, InPlaceRawPageTransmutation) {
 }
 
 // ============================================================================
-// Test 5: Page Integration - Accessors, LSN, and PageType on Page Class
+// Test 5: Page Decoupling & Canonical LSN / ResetMemory Support
 // ============================================================================
-TEST_F(CommonPageHeaderTest, PageClassIntegration) {
+TEST_F(CommonPageHeaderTest, PageDecouplingAndLSNSupport) {
     Page page;
 
-    // Verify initial header state on Page construction
+    // Verify initial clean state on Page construction
     EXPECT_EQ(page.GetPageId(), INVALID_PAGE_ID);
-    EXPECT_EQ(page.GetPageType(), PageType::INVALID_PAGE);
     EXPECT_EQ(page.GetLSN(), 0);
-    EXPECT_NE(page.GetHeader(), nullptr);
 
-    // Mutate through Page methods
+    // Page provides generic WAL LSN tracking without coupling to tree-specific headers
     page.SetPageId(50);
-    page.SetPageType(PageType::BPLUS_TREE_INTERNAL_PAGE);
     page.SetLSN(98765);
-    page.GetHeader()->SetPageId(50);
 
     EXPECT_EQ(page.GetPageId(), 50);
-    EXPECT_EQ(page.GetPageType(), PageType::BPLUS_TREE_INTERNAL_PAGE);
     EXPECT_EQ(page.GetLSN(), 98765);
 
-    // Verify synchronization with underlying CommonPageHeader
-    EXPECT_EQ(page.GetHeader()->GetPageId(), 50);
-    EXPECT_EQ(page.GetHeader()->GetPageType(), PageType::BPLUS_TREE_INTERNAL_PAGE);
-    EXPECT_EQ(page.GetHeader()->GetLSN(), 98765);
+    // In-place transmutation access through CommonPageHeader view
+    auto *header = reinterpret_cast<CommonPageHeader *>(page.GetData());
+    header->SetPageType(PageType::BPLUS_TREE_INTERNAL_PAGE);
+    header->SetPageId(50);
+    EXPECT_EQ(header->GetLSN(), 98765);
+    EXPECT_EQ(header->GetPageType(), PageType::BPLUS_TREE_INTERNAL_PAGE);
+    EXPECT_EQ(header->GetPageId(), 50);
 
-    // Test ResetMemory() clears page data
+    // ResetMemory() zero-fills the 4096-byte frame payload
     page.ResetMemory();
     EXPECT_EQ(page.GetLSN(), 0);
     EXPECT_EQ(page.GetPageId(), 50); // Preserves cached page_id tag

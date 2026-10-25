@@ -10,7 +10,6 @@
 #endif
 
 #include "config.h"
-#include "common_page_header.h"
 
 /**
  * @class Page
@@ -82,44 +81,22 @@ public:
      */
     const char *GetData() const;
  
-    /**
-     * @brief Access the in-place CommonPageHeader located at byte offset 0 of the page payload.
-     * @return CommonPageHeader* Pointer to in-place common page header.
-     */
-    CommonPageHeader *GetHeader();
+    static constexpr size_t OFFSET_LSN = 4;
 
     /**
-     * @brief Access the const in-place CommonPageHeader located at byte offset 0 of the page payload.
-     * @return const CommonPageHeader* Pointer to in-place common page header.
-     */
-    const CommonPageHeader *GetHeader() const;
-
-    /**
-     * @brief Get the Log Sequence Number (LSN) from the common page header.
+     * @brief Get the Log Sequence Number (LSN) from byte offset 4 of the page payload.
      * @return lsn_t The log sequence number.
      */
     lsn_t GetLSN() const;
 
     /**
-     * @brief Set the Log Sequence Number (LSN) on the common page header.
+     * @brief Set the Log Sequence Number (LSN) at byte offset 4 of the page payload.
      * @param lsn The log sequence number.
      */
     void SetLSN(lsn_t lsn);
 
     /**
-     * @brief Get the PageType discriminator from the common page header.
-     * @return PageType The page discriminator.
-     */
-    PageType GetPageType() const;
-
-    /**
-     * @brief Set the PageType discriminator on the common page header.
-     * @param type The page discriminator.
-     */
-    void SetPageType(PageType type);
-
-    /**
-     * @brief Zero-fill the 4096-byte page payload and reinitialize the CommonPageHeader with sentinels.
+     * @brief Zero-fill the 4096-byte page payload.
      */
     void ResetMemory();
 
