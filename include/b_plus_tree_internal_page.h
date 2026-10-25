@@ -8,6 +8,7 @@
 #include <type_traits>
 #include "config.h"
 #include "b_plus_tree_page.h"
+#include "generic_key.h"
 
 /**
  * @class BPlusTreeInternalPage
@@ -39,7 +40,7 @@ public:
     using MappingType = std::pair<KeyType, ValueType>;
 
     static constexpr size_t INTERNAL_PAGE_HEADER_SIZE = sizeof(BPlusTreePage); // 24 bytes
-    static constexpr size_t INTERNAL_PAGE_SIZE = (PAGE_SIZE - INTERNAL_PAGE_HEADER_SIZE) / sizeof(MappingType);
+    static constexpr size_t INTERNAL_PAGE_SIZE = BPlusTreePageSizeEstimator::ComputeInternalMaxSize<KeyType, ValueType>(PAGE_SIZE);
 
     BPlusTreeInternalPage() = default;
 
@@ -258,7 +259,8 @@ private:
      */
     template <typename Comp, typename K>
     static int Compare(const Comp &comp, const K &a, const K &b) {
-        if constexpr (std::is_invocable_r_v<bool, Comp, K, K>) {
+        using RetType = std::invoke_result_t<Comp, K, K>;
+        if constexpr (std::is_same_v<RetType, bool>) {
             if (comp(a, b)) return -1;
             if (comp(b, a)) return 1;
             return 0;
@@ -269,7 +271,6 @@ private:
             return 0;
         }
     }
-
     MappingType array_[INTERNAL_PAGE_SIZE];
 };
 

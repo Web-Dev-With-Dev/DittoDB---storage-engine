@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
-  <img src="https://img.shields.io/badge/Tests-230%2F230%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-239%2F239%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier%20Storage-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Sanitizers-TSan%20%7C%20Helgrind%20Clean-success.svg" alt="Sanitizers" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
@@ -288,7 +288,7 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 - **LRU-K Replacer:** Canonical sample test (frames 1..5), FIFO tie-breaking for frames with $< K$ accesses, post-eviction history wiping, idempotent `SetEvictable` calls, dynamic cold-to-hot queue migration.
 - **Buffer Pool Manager:** Canonical 10-page cycle, full 4096-byte randomized binary payloads with embedded null bytes (`\0`), `NewPage(nullptr)` parameter safety, sticky dirty bit persistence across interleaved unpins, unpinned dirty page deletion, and destructor flush persistence.
 
-### Test Suite Coverage Breakdown (230/230 Passing)
+### Test Suite Coverage Breakdown (239/239 Passing)
 
 | Test Suite | Tests | Features Covered |
 | :--- | :---: | :--- |
@@ -306,10 +306,11 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 | `CommonPageHeaderTest` | 7 | 24-byte layout verification, natural 4-byte word alignment, sentinel initialization, in-place raw memory casting, Page/TablePage integration, BPlusTreePage casting |
 | `BPlusTreeInternalPageTest` | 9 | (key, child_page_id) array layout, binary-search child lookup, insert-after helper, root split populate, removal shift, zero-copy Page transmutation, custom comparators |
 | `BPlusTreeLeafPageTest` | 10 | Sorted (key, RID) array layout, next_page_id sequential linking, binary search lookup, sorted insert, duplicate rejection, split/merge helpers, custom comparators |
+| `GenericKeyTest` | 9 | GenericKey<N> layout, order-preserving integer/float/string serialization, memcmp-ready lexicographical encoding, GenericComparator, BPlusTreePageSizeEstimator capacity calculations, leaf/internal integration |
 
 ```
-100% tests passed, 0 tests failed out of 230
-Total Test time (real) = 12.21 sec
+100% tests passed, 0 tests failed out of 239
+Total Test time (real) = 12.48 sec
 ```
 
 ### ThreadSanitizer & Helgrind Verification

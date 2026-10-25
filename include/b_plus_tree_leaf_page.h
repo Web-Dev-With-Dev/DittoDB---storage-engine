@@ -9,6 +9,7 @@
 #include "config.h"
 #include "rid.h"
 #include "b_plus_tree_page.h"
+#include "generic_key.h"
 
 /**
  * @class BPlusTreeLeafPage
@@ -40,8 +41,8 @@ public:
 
     static constexpr size_t RAW_HEADER_SIZE = sizeof(BPlusTreePage) + sizeof(page_id_t);
     // Align header boundary to 8 bytes for 64-bit keys/RIDs
-    static constexpr size_t ALIGNED_HEADER_SIZE = ((RAW_HEADER_SIZE + 7) / 8) * 8; // 32 bytes
-    static constexpr size_t LEAF_PAGE_SIZE = (PAGE_SIZE - ALIGNED_HEADER_SIZE) / sizeof(MappingType);
+    static constexpr size_t ALIGNED_HEADER_SIZE = BPlusTreePageSizeEstimator::LEAF_HEADER_ALIGNED_SIZE; // 32 bytes
+    static constexpr size_t LEAF_PAGE_SIZE = BPlusTreePageSizeEstimator::ComputeLeafMaxSize<KeyType, ValueType>(PAGE_SIZE);
 
     BPlusTreeLeafPage() = default;
 
@@ -359,7 +360,8 @@ private:
      */
     template <typename Comp, typename K>
     static int Compare(const Comp &comp, const K &a, const K &b) {
-        if constexpr (std::is_invocable_r_v<bool, Comp, K, K>) {
+        using RetType = std::invoke_result_t<Comp, K, K>;
+        if constexpr (std::is_same_v<RetType, bool>) {
             if (comp(a, b)) return -1;
             if (comp(b, a)) return 1;
             return 0;
