@@ -344,6 +344,29 @@ else()
     message(WARNING "buffer_pool_manager_concurrent_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/buffer_pool_manager_concurrent_test.cpp")
 endif()
 
+# 12. Common Page Header Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/common_page_header_test.cpp)
+    message(STATUS "Found common_page_header_test.cpp")
+    add_executable(common_page_header_test
+        tests/common_page_header_test.cpp
+    )
+    
+    target_link_libraries(common_page_header_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(common_page_header_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(common_page_header_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "common_page_header_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/common_page_header_test.cpp")
+endif()
+
 # ==================== Test Runner Targets ====================
 
 # Run LRU-K tests specifically
@@ -396,6 +419,9 @@ add_custom_target(run_all_tests
     COMMAND ${CMAKE_COMMAND} -E echo "11. Running Buffer Pool Manager Concurrent Stress Tests..."
     COMMAND ./buffer_pool_manager_concurrent_test || echo "BPM Concurrent tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "12. Running Common Page Header Tests..."
+    COMMAND ./common_page_header_test || echo "Common Page Header tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
     COMMAND ${CMAKE_COMMAND} -E echo "All tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
@@ -411,6 +437,7 @@ add_custom_target(run_all_tests
         extendible_hash_table_test
         e2e_storage_test
         buffer_pool_manager_concurrent_test
+        common_page_header_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running all tests"
 )

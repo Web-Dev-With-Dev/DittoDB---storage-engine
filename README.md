@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
-  <img src="https://img.shields.io/badge/Tests-204%2F204%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-208%2F208%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier%20Storage-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Sanitizers-TSan%20%7C%20Helgrind%20Clean-success.svg" alt="Sanitizers" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
@@ -303,10 +303,11 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 | `ExtendibleHashTableTest` | 10 | Directory page doubling/shrinking, split images, hash masking, bucket splits, key redistribution, persistence across eviction |
 | `EndToEndStorageIntegrationTest` | 4 | Real DiskManager + LRUK + BPM + TablePage + TableHeap cooperating across 50+ pages with 4-5 frames, forced dirty-evictions, crash recovery |
 | `BufferPoolManagerConcurrentTest` | 7 | Concurrent `FetchPage`/`UnpinPage` contention, 10-thread eviction storm, concurrent `NewPage` allocation, reader-writer latching isolation, pin exhaustion recovery, frame reservation on unbuffered page |
+| `CommonPageHeaderTest` | 4 | 24-byte layout verification, natural 4-byte word alignment, sentinel initialization, in-place raw memory casting |
 
 ```
-100% tests passed, 0 tests failed out of 204
-Total Test time (real) = 13.79 sec
+100% tests passed, 0 tests failed out of 208
+Total Test time (real) = 12.96 sec
 ```
 
 ### ThreadSanitizer & Helgrind Verification

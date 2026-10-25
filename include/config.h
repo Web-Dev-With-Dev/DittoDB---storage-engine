@@ -32,4 +32,14 @@ using frame_id_t = std::size_t;
  * @brief Sentinel value indicating an invalid or unassigned frame ID.
  */
 constexpr frame_id_t INVALID_FRAME_ID = static_cast<frame_id_t>(-1);
+
+/**
+ * @brief Log sequence number (LSN) type for Write-Ahead Logging (WAL) and ARIES recovery.
+ */
+using lsn_t = std::int32_t;
+
+/**
+ * @brief Sentinel value indicating an invalid or unassigned LSN.
+ */
+constexpr lsn_t INVALID_LSN = -1;
 
