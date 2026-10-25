@@ -1,11 +1,12 @@
 #include "page.h"
+#include <new>
 
 Page::Page()
     : page_id_(INVALID_PAGE_ID),
       pin_count_(0),
       is_dirty_(false)
 {
-    data_.fill(0);
+    ResetMemory();
 #if defined(__unix__) || defined(__APPLE__)
     pthread_rwlock_init(&latch_, nullptr);
 #endif
@@ -43,6 +44,41 @@ char *Page::GetData()
 const char *Page::GetData() const
 {
     return data_.data();
+}
+
+CommonPageHeader *Page::GetHeader()
+{
+    return reinterpret_cast<CommonPageHeader *>(data_.data());
+}
+
+const CommonPageHeader *Page::GetHeader() const
+{
+    return reinterpret_cast<const CommonPageHeader *>(data_.data());
+}
+
+lsn_t Page::GetLSN() const
+{
+    return GetHeader()->GetLSN();
+}
+
+void Page::SetLSN(lsn_t lsn)
+{
+    GetHeader()->SetLSN(lsn);
+}
+
+PageType Page::GetPageType() const
+{
+    return GetHeader()->GetPageType();
+}
+
+void Page::SetPageType(PageType type)
+{
+    GetHeader()->SetPageType(type);
+}
+
+void Page::ResetMemory()
+{
+    data_.fill(0);
 }
 
 // Setters

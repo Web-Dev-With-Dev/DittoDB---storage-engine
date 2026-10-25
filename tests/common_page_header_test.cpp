@@ -129,3 +129,91 @@ TEST_F(CommonPageHeaderTest, InPlaceRawPageTransmutation) {
         EXPECT_EQ(raw_data[i], 0);
     }
 }
+
+// ============================================================================
+// Test 5: Page Integration - Accessors, LSN, and PageType on Page Class
+// ============================================================================
+TEST_F(CommonPageHeaderTest, PageClassIntegration) {
+    Page page;
+
+    // Verify initial header state on Page construction
+    EXPECT_EQ(page.GetPageId(), INVALID_PAGE_ID);
+    EXPECT_EQ(page.GetPageType(), PageType::INVALID_PAGE);
+    EXPECT_EQ(page.GetLSN(), 0);
+    EXPECT_NE(page.GetHeader(), nullptr);
+
+    // Mutate through Page methods
+    page.SetPageId(50);
+    page.SetPageType(PageType::BPLUS_TREE_INTERNAL_PAGE);
+    page.SetLSN(98765);
+    page.GetHeader()->SetPageId(50);
+
+    EXPECT_EQ(page.GetPageId(), 50);
+    EXPECT_EQ(page.GetPageType(), PageType::BPLUS_TREE_INTERNAL_PAGE);
+    EXPECT_EQ(page.GetLSN(), 98765);
+
+    // Verify synchronization with underlying CommonPageHeader
+    EXPECT_EQ(page.GetHeader()->GetPageId(), 50);
+    EXPECT_EQ(page.GetHeader()->GetPageType(), PageType::BPLUS_TREE_INTERNAL_PAGE);
+    EXPECT_EQ(page.GetHeader()->GetLSN(), 98765);
+
+    // Test ResetMemory() clears page data
+    page.ResetMemory();
+    EXPECT_EQ(page.GetLSN(), 0);
+    EXPECT_EQ(page.GetPageId(), 50); // Preserves cached page_id tag
+}
+
+// ============================================================================
+// Test 6: BPlusTreePage Zero-Copy In-Place Casting
+// ============================================================================
+#include "b_plus_tree_page.h"
+
+TEST_F(CommonPageHeaderTest, BPlusTreePageCasting) {
+    Page page;
+    page.SetPageId(12);
+
+    BPlusTreePage *b_page = BPlusTreePage::Cast(&page);
+    ASSERT_NE(b_page, nullptr);
+
+    b_page->SetPageType(PageType::BPLUS_TREE_LEAF_PAGE);
+    b_page->SetSize(16);
+    b_page->SetMaxSize(32);
+    b_page->SetParentPageId(5);
+    b_page->SetLSN(1001);
+    b_page->SetPageId(12);
+
+    EXPECT_TRUE(b_page->IsLeafPage());
+    EXPECT_FALSE(b_page->IsInternalPage());
+    EXPECT_FALSE(b_page->IsRootPage());
+    EXPECT_EQ(b_page->GetSize(), 16);
+    EXPECT_EQ(b_page->GetMaxSize(), 32);
+    EXPECT_EQ(b_page->GetMinSize(), 16);
+    EXPECT_EQ(b_page->GetParentPageId(), 5);
+    EXPECT_EQ(b_page->GetPageId(), 12);
+    EXPECT_EQ(b_page->GetLSN(), 1001);
+
+    // Const cast overload
+    const Page &c_page = page;
+    const BPlusTreePage *cb_page = BPlusTreePage::Cast(&c_page);
+    ASSERT_NE(cb_page, nullptr);
+    EXPECT_EQ(cb_page->GetPageId(), 12);
+    EXPECT_EQ(cb_page->GetSize(), 16);
+}
+
+// ============================================================================
+// Test 7: TablePage Integration with Common Header
+// ============================================================================
+#include "table_page.h"
+
+TEST_F(CommonPageHeaderTest, TablePageIntegration) {
+    TablePage tp;
+    tp.Init(88);
+
+    EXPECT_EQ(tp.GetTablePageId(), 88);
+    EXPECT_EQ(tp.GetPageId(), 88);
+    // TablePage shares OFFSET_LSN = 4 with CommonPageHeader
+    tp.SetLSN(12345);
+    EXPECT_EQ(tp.GetLSN(), 12345);
+    EXPECT_EQ(tp.Page::GetLSN(), 12345);
+}
+

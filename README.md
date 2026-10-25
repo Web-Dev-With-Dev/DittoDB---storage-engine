@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
-  <img src="https://img.shields.io/badge/Tests-208%2F208%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-211%2F211%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier%20Storage-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Sanitizers-TSan%20%7C%20Helgrind%20Clean-success.svg" alt="Sanitizers" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
@@ -288,7 +288,7 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 - **LRU-K Replacer:** Canonical sample test (frames 1..5), FIFO tie-breaking for frames with $< K$ accesses, post-eviction history wiping, idempotent `SetEvictable` calls, dynamic cold-to-hot queue migration.
 - **Buffer Pool Manager:** Canonical 10-page cycle, full 4096-byte randomized binary payloads with embedded null bytes (`\0`), `NewPage(nullptr)` parameter safety, sticky dirty bit persistence across interleaved unpins, unpinned dirty page deletion, and destructor flush persistence.
 
-### Test Suite Coverage Breakdown (203/203 Passing)
+### Test Suite Coverage Breakdown (211/211 Passing)
 
 | Test Suite | Tests | Features Covered |
 | :--- | :---: | :--- |
@@ -303,11 +303,11 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 | `ExtendibleHashTableTest` | 10 | Directory page doubling/shrinking, split images, hash masking, bucket splits, key redistribution, persistence across eviction |
 | `EndToEndStorageIntegrationTest` | 4 | Real DiskManager + LRUK + BPM + TablePage + TableHeap cooperating across 50+ pages with 4-5 frames, forced dirty-evictions, crash recovery |
 | `BufferPoolManagerConcurrentTest` | 7 | Concurrent `FetchPage`/`UnpinPage` contention, 10-thread eviction storm, concurrent `NewPage` allocation, reader-writer latching isolation, pin exhaustion recovery, frame reservation on unbuffered page |
-| `CommonPageHeaderTest` | 4 | 24-byte layout verification, natural 4-byte word alignment, sentinel initialization, in-place raw memory casting |
+| `CommonPageHeaderTest` | 7 | 24-byte layout verification, natural 4-byte word alignment, sentinel initialization, in-place raw memory casting, Page/TablePage integration, BPlusTreePage casting |
 
 ```
-100% tests passed, 0 tests failed out of 208
-Total Test time (real) = 12.96 sec
+100% tests passed, 0 tests failed out of 211
+Total Test time (real) = 11.67 sec
 ```
 
 ### ThreadSanitizer & Helgrind Verification
