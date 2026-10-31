@@ -271,7 +271,96 @@ TEST_F(BPlusTreeTest, HandleDuplicateKeys) {
 }
 
 // ============================================================================
-// Test 6: Manually Constructed Multi-Level Tree (Traverse Root to Leaf)
+// Test 6: Leaf Split (Move Upper Half, Fix Next-Pointer Chain, Push Separator Up)
+// ============================================================================
+TEST_F(BPlusTreeTest, LeafSplitNextPointerAndSeparatorPushUp) {
+    // Leaf max size = 4, internal max size = 4
+    BPlusTree<int, RID> tree("leaf_split_tree", bpm_.get(), std::less<int>{}, 4, 4);
+
+    // 1. Fill leaf to capacity (4 entries)
+    EXPECT_TRUE(tree.Insert(10, RID(1, 10)));
+    EXPECT_TRUE(tree.Insert(20, RID(1, 20)));
+    EXPECT_TRUE(tree.Insert(30, RID(1, 30)));
+    EXPECT_TRUE(tree.Insert(40, RID(1, 40)));
+    EXPECT_EQ(tree.GetDepth(), 1u);
+    EXPECT_EQ(tree.GetRecordCount(), 4u);
+
+    page_id_t initial_leaf_pid = tree.GetRootPageId();
+    AssertAllPagesUnpinned();
+
+    // 2. Insert 5th element -> triggers leaf split and root internal node creation!
+    EXPECT_TRUE(tree.Insert(50, RID(1, 50)));
+    EXPECT_EQ(tree.GetDepth(), 2u);
+    EXPECT_EQ(tree.GetRecordCount(), 5u);
+
+    // 3. Inspect internal root node
+    page_id_t root_pid = tree.GetRootPageId();
+    EXPECT_NE(root_pid, initial_leaf_pid);
+
+    Page *root_frame = bpm_->FetchPage(root_pid);
+    ASSERT_NE(root_frame, nullptr);
+    auto *root_internal = BPlusTreeInternalPage<int, page_id_t>::Cast(root_frame);
+    EXPECT_TRUE(root_internal->IsInternalPage());
+    EXPECT_EQ(root_internal->GetSize(), 2);
+
+    // Separator key pushed up must be 30 (first key of right sibling leaf)
+    EXPECT_EQ(root_internal->ValueAt(0), initial_leaf_pid);
+    EXPECT_EQ(root_internal->KeyAt(1), 30);
+    page_id_t right_leaf_pid = root_internal->ValueAt(1);
+    EXPECT_NE(right_leaf_pid, initial_leaf_pid);
+    bpm_->UnpinPage(root_pid, false);
+
+    // 4. Inspect left leaf: must retain lower half (10, 20)
+    Page *left_frame = bpm_->FetchPage(initial_leaf_pid);
+    ASSERT_NE(left_frame, nullptr);
+    auto *left_leaf = BPlusTreeLeafPage<int, RID>::Cast(left_frame);
+    EXPECT_EQ(left_leaf->GetSize(), 2);
+    EXPECT_EQ(left_leaf->KeyAt(0), 10);
+    EXPECT_EQ(left_leaf->KeyAt(1), 20);
+
+    // 5. Inspect next-pointer chain: left_leaf -> right_leaf -> INVALID_PAGE_ID
+    EXPECT_EQ(left_leaf->GetNextPageId(), right_leaf_pid);
+    bpm_->UnpinPage(initial_leaf_pid, false);
+
+    // 6. Inspect right leaf: must contain upper half (30, 40, 50)
+    Page *right_frame = bpm_->FetchPage(right_leaf_pid);
+    ASSERT_NE(right_frame, nullptr);
+    auto *right_leaf = BPlusTreeLeafPage<int, RID>::Cast(right_frame);
+    EXPECT_EQ(right_leaf->GetSize(), 3);
+    EXPECT_EQ(right_leaf->KeyAt(0), 30);
+    EXPECT_EQ(right_leaf->KeyAt(1), 40);
+    EXPECT_EQ(right_leaf->KeyAt(2), 50);
+    EXPECT_EQ(right_leaf->GetNextPageId(), INVALID_PAGE_ID);
+    bpm_->UnpinPage(right_leaf_pid, false);
+
+    // 7. Test sequential leaf chain scan from left to right
+    page_id_t scan_pid = initial_leaf_pid;
+    std::vector<int> scanned_keys;
+    while (scan_pid != INVALID_PAGE_ID) {
+        Page *p = bpm_->FetchPage(scan_pid);
+        auto *leaf = BPlusTreeLeafPage<int, RID>::Cast(p);
+        for (int i = 0; i < leaf->GetSize(); ++i) {
+            scanned_keys.push_back(leaf->KeyAt(i));
+        }
+        page_id_t next = leaf->GetNextPageId();
+        bpm_->UnpinPage(scan_pid, false);
+        scan_pid = next;
+    }
+    std::vector<int> expected_keys = {10, 20, 30, 40, 50};
+    EXPECT_EQ(scanned_keys, expected_keys);
+
+    // 8. Verify GetValue finds all keys via hierarchical traversal
+    for (int k : expected_keys) {
+        RID res;
+        EXPECT_TRUE(tree.GetValue(k, &res));
+        EXPECT_EQ(res, RID(1, static_cast<uint32_t>(k)));
+    }
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 7: Manually Constructed Multi-Level Tree (Traverse Root to Leaf)
 // ============================================================================
 TEST_F(BPlusTreeTest, ManualMultiLevelTreeTraversal) {
     using LeafPage = BPlusTreeLeafPage<int, RID>;
@@ -396,7 +485,7 @@ TEST_F(BPlusTreeTest, ManualMultiLevelTreeTraversal) {
 }
 
 // ============================================================================
-// Test 7: Dynamic Insert, Splits, and Large Scale GetValue Lookups
+// Test 8: Dynamic Insert, Splits, and Large Scale GetValue Lookups
 // ============================================================================
 TEST_F(BPlusTreeTest, DynamicInsertAndGetValueStress) {
     // Small capacities to trigger frequent leaf and internal splits
@@ -447,7 +536,7 @@ TEST_F(BPlusTreeTest, DynamicInsertAndGetValueStress) {
 }
 
 // ============================================================================
-// Test 8: Vector Overload Compatibility (CMU 15-445 Parity)
+// Test 9: Vector Overload Compatibility (CMU 15-445 Parity)
 // ============================================================================
 TEST_F(BPlusTreeTest, VectorGetValueOverload) {
     BPlusTree<int, RID> tree("vector_test", bpm_.get(), std::less<int>{}, 5, 5);
@@ -469,7 +558,7 @@ TEST_F(BPlusTreeTest, VectorGetValueOverload) {
 }
 
 // ============================================================================
-// Test 9: GenericKey and GenericComparator Integration
+// Test 10: GenericKey and GenericComparator Integration
 // ============================================================================
 TEST_F(BPlusTreeTest, GenericKeyGetValue) {
     using Key64 = GenericKey<8>;
@@ -501,7 +590,7 @@ TEST_F(BPlusTreeTest, GenericKeyGetValue) {
 }
 
 // ============================================================================
-// Test 10: Persistence and Crash Restart
+// Test 11: Persistence and Crash Restart
 // ============================================================================
 TEST_F(BPlusTreeTest, PersistenceAndRecovery) {
     page_id_t header_pid = INVALID_PAGE_ID;

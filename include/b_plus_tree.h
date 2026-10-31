@@ -440,81 +440,80 @@ private:
         }
 
         // Case 2: Leaf is full -> Split Leaf Node!
-        page_id_t new_leaf_pid = INVALID_PAGE_ID;
-        Page *new_leaf_frame = bpm_->NewPage(&new_leaf_pid);
-        if (new_leaf_frame == nullptr) {
+        // 1. Allocate new leaf, move upper half, fix next-pointer chain
+        LeafPage *new_leaf = Split(leaf);
+        if (new_leaf == nullptr) {
             bpm_->UnpinPage(leaf_frame->GetPageId(), false);
             return false;
         }
 
-        auto *new_leaf = LeafPage::Cast(new_leaf_frame);
-        new_leaf->Init(new_leaf_pid, leaf->GetParentPageId(), leaf_max_size_);
-
-        // Redistribute upper half to new sibling leaf
-        leaf->MoveHalfTo(new_leaf);
-
-        // Insert new entry into the appropriate half
+        // Insert new entry into the appropriate half based on separator key
         if (Compare(comparator_, key, new_leaf->KeyAt(0)) < 0) {
             leaf->Insert(key, value, comparator_);
         } else {
             new_leaf->Insert(key, value, comparator_);
         }
 
-        KeyType split_key = new_leaf->KeyAt(0);
-
-        if (leaf->IsRootPage()) {
-            // Root split: create new internal root
-            page_id_t new_root_pid = INVALID_PAGE_ID;
-            Page *new_root_frame = bpm_->NewPage(&new_root_pid);
-            if (new_root_frame == nullptr) {
-                bpm_->UnpinPage(new_leaf_pid, true);
-                bpm_->UnpinPage(leaf_frame->GetPageId(), true);
-                return false;
-            }
-
-            auto *new_root = InternalPage::Cast(new_root_frame);
-            new_root->Init(new_root_pid, INVALID_PAGE_ID, internal_max_size_);
-            new_root->Populate(leaf->GetPageId(), split_key, new_leaf->GetPageId());
-
-            leaf->SetParentPageId(new_root_pid);
-            new_leaf->SetParentPageId(new_root_pid);
-
-            SetRootPageId(new_root_pid);
-            UpdateHeaderMetadata(new_root_pid, GetDepth() + 1, 1);
-
-            bpm_->UnpinPage(new_root_pid, true);
-            bpm_->UnpinPage(new_leaf_pid, true);
-            bpm_->UnpinPage(leaf_frame->GetPageId(), true);
-            return true;
-        }
-
-        // Leaf is not root: insert split key into parent internal node
-        InsertIntoParent(leaf_frame, split_key, new_leaf_frame);
+        // 2. Push separator key (first key of new right leaf) up to parent
+        KeyType separator_key = new_leaf->KeyAt(0);
+        InsertIntoParent(leaf, separator_key, new_leaf);
         UpdateRecordCount(1);
 
-        bpm_->UnpinPage(new_leaf_pid, true);
+        bpm_->UnpinPage(new_leaf->GetPageId(), true);
         bpm_->UnpinPage(leaf_frame->GetPageId(), true);
         return true;
     }
 
+public:
     /**
-     * @brief Insert child pointer and separator key into parent internal node.
-     * Recursively splits parent if full, potentially creating a new internal root.
+     * @brief Split a full leaf page:
+     * 1. Allocates a new sibling leaf frame in BufferPoolManager.
+     * 2. Moves the upper half of sorted entries from leaf to new_leaf.
+     * 3. Fixes the sequential next-pointer chain: leaf -> new_leaf -> old_next.
+     * The returned new leaf page frame is pinned in BPM and must be unpinned by the caller.
+     *
+     * @param leaf Pointer to the full leaf page.
+     * @return LeafPage* Pointer to newly allocated sibling leaf (pinned in BPM), or nullptr on failure.
      */
-    void InsertIntoParent(Page *old_child_page, const KeyType &key, Page *new_child_page) {
-        auto *old_child = BPlusTreePage::Cast(old_child_page);
-        auto *new_child = BPlusTreePage::Cast(new_child_page);
+    LeafPage *Split(LeafPage *leaf) {
+        page_id_t new_leaf_pid = INVALID_PAGE_ID;
+        Page *new_leaf_frame = bpm_->NewPage(&new_leaf_pid);
+        if (new_leaf_frame == nullptr) {
+            return nullptr;
+        }
+
+        auto *new_leaf = LeafPage::Cast(new_leaf_frame);
+        new_leaf->Init(new_leaf_pid, leaf->GetParentPageId(), leaf_max_size_);
+
+        // Move upper half of entries and fix next-pointer chain:
+        // leaf -> new_leaf -> old_next
+        leaf->MoveHalfTo(new_leaf);
+
+        return new_leaf;
+    }
+
+    /**
+     * @brief Push the separator key and new child pointer up to the parent internal node.
+     * - If old_child was root: allocates a new internal root, populates it, and increments tree depth.
+     * - If parent has space: inserts separator key and new child pointer using InsertNodeAfter.
+     * - If parent is full: splits the parent internal node and recursively pushes up the median separator.
+     *
+     * @param old_child Pointer to left child page.
+     * @param separator_key Key separating old_child and new_child (first key of new_child for leaves).
+     * @param new_child Pointer to newly created right child page.
+     */
+    void InsertIntoParent(BPlusTreePage *old_child, const KeyType &separator_key, BPlusTreePage *new_child) {
         page_id_t parent_pid = old_child->GetParentPageId();
 
         if (parent_pid == INVALID_PAGE_ID) {
-            // old_child was root: allocate new internal root
+            // Root Split: old_child was root -> allocate new internal root
             page_id_t new_root_pid = INVALID_PAGE_ID;
             Page *new_root_frame = bpm_->NewPage(&new_root_pid);
             if (new_root_frame == nullptr) return;
 
             auto *new_root = InternalPage::Cast(new_root_frame);
             new_root->Init(new_root_pid, INVALID_PAGE_ID, internal_max_size_);
-            new_root->Populate(old_child->GetPageId(), key, new_child->GetPageId());
+            new_root->Populate(old_child->GetPageId(), separator_key, new_child->GetPageId());
 
             old_child->SetParentPageId(new_root_pid);
             new_child->SetParentPageId(new_root_pid);
@@ -533,7 +532,7 @@ private:
 
         // Case 1: Parent has space
         if (parent->GetSize() < parent->GetMaxSize()) {
-            parent->InsertNodeAfter(old_child->GetPageId(), key, new_child->GetPageId());
+            parent->InsertNodeAfter(old_child->GetPageId(), separator_key, new_child->GetPageId());
             new_child->SetParentPageId(parent_pid);
             bpm_->UnpinPage(parent_pid, true);
             return;
@@ -556,7 +555,7 @@ private:
         for (int i = 0; i <= old_idx; ++i) {
             entries.push_back({parent->KeyAt(i), parent->ValueAt(i)});
         }
-        entries.push_back({key, new_child->GetPageId()});
+        entries.push_back({separator_key, new_child->GetPageId()});
         for (int i = old_idx + 1; i < parent->GetSize(); ++i) {
             entries.push_back({parent->KeyAt(i), parent->ValueAt(i)});
         }
@@ -592,7 +591,7 @@ private:
         }
 
         // Recurse up to parent's parent
-        InsertIntoParent(parent_frame, split_up_key, new_parent_frame);
+        InsertIntoParent(parent, split_up_key, new_parent);
 
         bpm_->UnpinPage(new_parent_pid, true);
         bpm_->UnpinPage(parent_pid, true);
