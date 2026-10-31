@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
-  <img src="https://img.shields.io/badge/Tests-244%2F244%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-251%2F251%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier%20Storage-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Sanitizers-TSan%20%7C%20Helgrind%20Clean-success.svg" alt="Sanitizers" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
@@ -219,8 +219,8 @@ A disk-backed, buffer-pool-managed dynamic hash index:
 
 ---
 
-### 8. B+ Tree Index Node Architecture (`BPlusTreePage`, `BPlusTreeInternalPage`, `BPlusTreeLeafPage`, `BPlusTreeHeaderPage`)
-- **Headers:** [`include/common_page_header.h`](include/common_page_header.h) · [`include/b_plus_tree_page.h`](include/b_plus_tree_page.h) · [`include/b_plus_tree_internal_page.h`](include/b_plus_tree_internal_page.h) · [`include/b_plus_tree_leaf_page.h`](include/b_plus_tree_leaf_page.h) · [`include/b_plus_tree_header_page.h`](include/b_plus_tree_header_page.h) · [`include/generic_key.h`](include/generic_key.h)
+### 8. B+ Tree Index Architecture (`BPlusTree`, `BPlusTreePage`, `BPlusTreeInternalPage`, `BPlusTreeLeafPage`, `BPlusTreeHeaderPage`)
+- **Headers:** [`include/b_plus_tree.h`](include/b_plus_tree.h) · [`include/common_page_header.h`](include/common_page_header.h) · [`include/b_plus_tree_page.h`](include/b_plus_tree_page.h) · [`include/b_plus_tree_internal_page.h`](include/b_plus_tree_internal_page.h) · [`include/b_plus_tree_leaf_page.h`](include/b_plus_tree_leaf_page.h) · [`include/b_plus_tree_header_page.h`](include/b_plus_tree_header_page.h) · [`include/generic_key.h`](include/generic_key.h)
 
 DittoDB features an in-place B+ Tree index storage layer built directly on top of 4096-byte `Page` memory frames without dynamic heap allocations inside node blocks. All node types inherit from a shared 24-byte header enabling polymorphic type inspection, WAL logging, and zero-copy reinterpret casting:
 
@@ -328,6 +328,12 @@ Offset 0                                                                        
        ◄─────────────────────────── Sequential Leaf Chain ($O(1)$ Range Scans) ─────────────────►
 ```
 
+#### 6. Point Lookup (`GetValue`) & Strict Page Unpin Protocol
+Point lookup locates the exact record associated with a key:
+- **Hierarchical Descent (`FindLeafPage`):** Starting at `GetRootPageId()`, the engine fetches the root page and checks `IsLeafPage()`. If internal, it performs binary search on `array_[1 .. size-1]` to identify the routing child pointer, fetches the child page frame, and **immediately unpins the parent internal page frame** (`bpm_->UnpinPage(curr_pid, false)`).
+- **Leaf Binary Search:** On reaching the leaf node, `leaf->Lookup(key, result, comparator_)` runs binary search in $O(\log M)$ time across the sorted `(key, RID)` entries.
+- **Strict Zero-Leak Unpinning Guarantee:** Every page accessed during traversal (the persistent `BPlusTreeHeaderPage`, all traversed internal nodes, and the final leaf node) is guaranteed to be unpinned with `is_dirty = false` before `GetValue` returns.
+
 ---
 
 ## Key Engineering Trade-Offs
@@ -401,7 +407,7 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 - **LRU-K Replacer:** Canonical sample test (frames 1..5), FIFO tie-breaking for frames with $< K$ accesses, post-eviction history wiping, idempotent `SetEvictable` calls, dynamic cold-to-hot queue migration.
 - **Buffer Pool Manager:** Canonical 10-page cycle, full 4096-byte randomized binary payloads with embedded null bytes (`\0`), `NewPage(nullptr)` parameter safety, sticky dirty bit persistence across interleaved unpins, unpinned dirty page deletion, and destructor flush persistence.
 
-### Test Suite Coverage Breakdown (244/244 Passing)
+### Test Suite Coverage Breakdown (251/251 Passing)
 
 | Test Suite | Tests | Features Covered |
 | :--- | :---: | :--- |
@@ -421,10 +427,11 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 | `BPlusTreeLeafPageTest` | 10 | Sorted (key, RID) array layout, next_page_id sequential linking, binary search lookup, sorted insert, duplicate rejection, split/merge helpers, custom comparators |
 | `GenericKeyTest` | 9 | GenericKey<N> layout, order-preserving integer/float/string serialization, memcmp-ready lexicographical encoding, GenericComparator, BPlusTreePageSizeEstimator capacity calculations, leaf/internal integration |
 | `BPlusTreeHeaderPageTest` | 5 | 4096-byte header layout, root page pointer persistence, crash/restart durability via BPM/DiskManager, tree depth & record accounting, isolated leaf & internal node transitions |
+| `BPlusTreeTest` | 7 | Root-to-leaf traversal, binary-search point lookup (GetValue), zero pin leaks verification, multi-level routing, GenericKey integration, disk crash persistence |
 
 ```
-100% tests passed, 0 tests failed out of 244
-Total Test time (real) = 12.33 sec
+100% tests passed, 0 tests failed out of 251
+Total Test time (real) = 14.19 sec
 ```
 
 ### ThreadSanitizer & Helgrind Verification

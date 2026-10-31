@@ -50,6 +50,13 @@ set(COMMON_HEADERS
     include/extendible_htable_directory_page.h
     include/extendible_htable_bucket_page.h
     include/extendible_hash_table.h
+    include/common_page_header.h
+    include/b_plus_tree_page.h
+    include/b_plus_tree_header_page.h
+    include/b_plus_tree_internal_page.h
+    include/b_plus_tree_leaf_page.h
+    include/generic_key.h
+    include/b_plus_tree.h
 )
 
 # ==================== Main Executable ====================
@@ -459,6 +466,29 @@ else()
     message(WARNING "b_plus_tree_header_page_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/b_plus_tree_header_page_test.cpp")
 endif()
 
+# 17. B+ Tree Point Lookup and Traversal Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/b_plus_tree_test.cpp)
+    message(STATUS "Found b_plus_tree_test.cpp")
+    add_executable(b_plus_tree_test
+        tests/b_plus_tree_test.cpp
+    )
+    
+    target_link_libraries(b_plus_tree_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(b_plus_tree_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(b_plus_tree_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "b_plus_tree_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/b_plus_tree_test.cpp")
+endif()
+
 # ==================== Test Runner Targets ====================
 
 # Run LRU-K tests specifically
@@ -526,6 +556,9 @@ add_custom_target(run_all_tests
     COMMAND ${CMAKE_COMMAND} -E echo "16. Running B+ Tree Header Page Tests..."
     COMMAND ./b_plus_tree_header_page_test || echo "B+ Tree Header Page tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "17. Running B+ Tree Traversal & GetValue Tests..."
+    COMMAND ./b_plus_tree_test || echo "B+ Tree tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
     COMMAND ${CMAKE_COMMAND} -E echo "All tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
@@ -546,6 +579,7 @@ add_custom_target(run_all_tests
         b_plus_tree_leaf_page_test
         generic_key_test
         b_plus_tree_header_page_test
+        b_plus_tree_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running all tests"
 )
