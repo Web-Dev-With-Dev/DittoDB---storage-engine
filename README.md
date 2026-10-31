@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
-  <img src="https://img.shields.io/badge/Tests-262%2F262%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-266%2F266%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier%20Storage-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Sanitizers-TSan%20%7C%20Helgrind%20Clean-success.svg" alt="Sanitizers" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
@@ -341,6 +341,18 @@ The B+ Tree dynamically grows in depth through hierarchical splits:
 - **Root Split (`CreateNewRoot`):** When any root node (leaf or internal) splits, `CreateNewRoot` allocates a new internal root page, initializes it with `INVALID_PAGE_ID` parent, populates it with `(old_root_pid, separator_key, new_sibling_pid)`, updates parent pointers on both children, updates `root_page_id_`, synchronizes the persistent `BPlusTreeHeaderPage` with `depth + 1`, and unpins the new root dirty.
 - **Strict Pinning Invariant:** Every page fetched or created across recursive splits is guaranteed to be unpinned (`is_dirty = true` on mutations, `false` on errors).
 
+#### 8. Structural Invariant Validator & Graphviz Diagnostics
+To ensure rock-solid indexing consistency under extreme concurrent updates and cascading splits, DittoDB provides complete native diagnostic and validation capabilities:
+- **`ValidateTree()` & `CheckIntegrity()`:** Performs full hierarchical BFS inspection verifying:
+  1. *Root Invariants:* Proper initialization, zero parent pointer, correct root sizing.
+  2. *Sortedness & Partitioning:* Strict ascending order within leaf and internal nodes, plus strict subtree key bounds $[L, U)$ adherence.
+  3. *Occupancy:* Enforces $\ge \lfloor M/2 \rfloor$ for leaves and $\ge \lceil M/2 \rceil$ for non-root internal pages.
+  4. *Parent Pointers:* Validates that every child node's `parent_page_id` matches its parent's `page_id`.
+  5. *Leaf Chain Invariant:* Traverses `FindLeafPage(min, true)` through `next_page_id` asserting acyclicity, boundary order, and that the set of leaf pages exactly equals the hierarchy leaves with matching record count.
+  6. *Depth Consistency:* Validates that all leaves reside at identical depths matching header `depth_`.
+  7. *Strict Zero Pin Leaks:* Guarantees 100% of buffer frames fetched during validation are unpinned.
+- **Graphviz DOT Dump (`ToDot()`, `DumpGraphviz()`):** Generates clean, human-readable Graphviz representations rendering internal nodes (ports and separator keys) in `#E8EEF5`, leaf nodes (sorted key-value slots) in `#E8F5E9`, parent-child directed edges, and horizontal dashed green links along the sequential leaf chain.
+
 ---
 
 ## Key Engineering Trade-Offs
@@ -414,7 +426,7 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 - **LRU-K Replacer:** Canonical sample test (frames 1..5), FIFO tie-breaking for frames with $< K$ accesses, post-eviction history wiping, idempotent `SetEvictable` calls, dynamic cold-to-hot queue migration.
 - **Buffer Pool Manager:** Canonical 10-page cycle, full 4096-byte randomized binary payloads with embedded null bytes (`\0`), `NewPage(nullptr)` parameter safety, sticky dirty bit persistence across interleaved unpins, unpinned dirty page deletion, and destructor flush persistence.
 
-### Test Suite Coverage Breakdown (262/262 Passing)
+### Test Suite Coverage Breakdown (266/266 Passing)
 
 | Test Suite | Tests | Features Covered |
 | :--- | :---: | :--- |
@@ -434,11 +446,11 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 | `BPlusTreeLeafPageTest` | 10 | Sorted (key, RID) array layout, next_page_id sequential linking, binary search lookup, sorted insert, duplicate rejection, split/merge helpers, custom comparators |
 | `GenericKeyTest` | 9 | GenericKey<N> layout, order-preserving integer/float/string serialization, memcmp-ready lexicographical encoding, GenericComparator, BPlusTreePageSizeEstimator capacity calculations, leaf/internal integration |
 | `BPlusTreeHeaderPageTest` | 5 | 4096-byte header layout, root page pointer persistence, crash/restart durability via BPM/DiskManager, tree depth & record accounting, isolated leaf & internal node transitions |
-| `BPlusTreeTest` | 18 | Empty tree insert, leaf with space insert, duplicate key rejection, leaf split with next-pointer chain & separator push-up, modular root split (`CreateNewRoot`), modular internal split (`Split(InternalPage*)` & reparenting), multi-level dynamic depth progression, small fanouts (3-4) ascending right-splits, descending left-splits, random multi-level splits, alternating ping-pong splits, root-to-leaf traversal, binary search GetValue, zero pin leaks, GenericKey, persistence |
+| `BPlusTreeTest` | 22 | Empty tree insert, leaf with space insert, duplicate key rejection, leaf split with next-pointer chain & separator push-up, modular root split (`CreateNewRoot`), modular internal split (`Split(InternalPage*)` & reparenting), multi-level dynamic depth progression, small fanouts (3-4) ascending right-splits, descending left-splits, random multi-level splits, alternating ping-pong splits, structural invariant validator (`ValidateTree`), Graphviz DOT tree dump (`ToDot`, `DumpGraphviz`), root-to-leaf traversal, binary search GetValue, zero pin leaks, GenericKey, persistence |
 
 ```
-100% tests passed, 0 tests failed out of 262
-Total Test time (real) = 13.19 sec
+100% tests passed, 0 tests failed out of 266
+Total Test time (real) = 12.28 sec
 ```
 
 ### ThreadSanitizer & Helgrind Verification

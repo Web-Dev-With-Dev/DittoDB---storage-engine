@@ -10,6 +10,14 @@
 #include <functional>
 #include <type_traits>
 #include <algorithm>
+#include <sstream>
+#include <fstream>
+#include <iostream>
+#include <queue>
+#include <set>
+#include <unordered_set>
+#include <optional>
+#include <iomanip>
 
 #include "config.h"
 #include "page.h"
@@ -21,6 +29,22 @@
 #include "b_plus_tree_internal_page.h"
 #include "b_plus_tree_leaf_page.h"
 #include "generic_key.h"
+
+/**
+ * @struct TreeValidationResult
+ * @brief Detailed diagnostic report returned by BPlusTree::ValidateTree().
+ */
+struct TreeValidationResult {
+    bool is_valid{true};
+    std::string error_message{};
+    size_t total_keys{0};
+    size_t leaf_page_count{0};
+    size_t internal_page_count{0};
+    uint32_t depth{0};
+
+    explicit operator bool() const { return is_valid; }
+};
+
 
 /**
  * @class BPlusTree
@@ -745,6 +769,449 @@ public:
                 header->IncreaseRecordCount(delta);
                 bpm_->UnpinPage(header_page_id_, true);
             }
+        }
+    }
+
+public:
+    // ==================== Tree Validation & Graphviz Diagnostics ====================
+
+    /**
+     * @brief Validate all B+ Tree structural, occupancy, sorting, and topological invariants.
+     *
+     * Invariants Verified:
+     * 1. Root Invariants:
+     *    - If tree is empty: root_page_id is INVALID_PAGE_ID, record_count is 0, depth is 0.
+     *    - Root node has parent_page_id == INVALID_PAGE_ID.
+     *    - If root is internal: size >= 2 and size <= internal_max_size_.
+     * 2. Sortedness & Key Ordering Invariants:
+     *    - Every Leaf node: keys are strictly ascending: key[i] < key[i+1].
+     *    - Every Internal node: keys are strictly ascending: key[i] < key[i+1] for 1 <= i < size-1.
+     *    - Subtree partitioning: for each child i of an internal node, all keys in child's subtree
+     *      fall strictly within [lower_bound, upper_bound).
+     * 3. Occupancy (Fill-Factor) Invariants:
+     *    - Leaf nodes (non-root): size >= (leaf_max_size_ / 2) and size <= leaf_max_size_.
+     *    - Internal nodes (non-root): size >= ((internal_max_size_ + 1) / 2) and size <= internal_max_size_.
+     * 4. Parent Pointer Invariants:
+     *    - For every child C of internal node P, C->GetParentPageId() == P->GetPageId().
+     * 5. Leaf Chain (Sequential Linked List) Invariants:
+     *    - Traversal along next_page_id pointers visits every leaf discovered from the tree hierarchy.
+     *    - No cycles, no orphan/disconnected leaves.
+     *    - Across adjacent leaves: max_key(leaf_A) <= min_key(leaf_B).
+     *    - Sum of leaf keys equals total_keys and matches GetRecordCount().
+     * 6. Depth Consistency:
+     *    - Every leaf is at the exact same depth from root, matching GetDepth().
+     * 7. Buffer Pool Pin Invariance:
+     *    - Guarantees zero pin leaks: every page accessed is cleanly unpinned before returning.
+     *
+     * @return TreeValidationResult Result containing validity boolean, error description, and stats.
+     */
+    TreeValidationResult ValidateTree() const {
+        std::shared_lock<std::shared_mutex> lock(*rwlock_);
+
+        page_id_t root_pid = GetRootPageId();
+        if (root_pid == INVALID_PAGE_ID) {
+            if (GetRecordCount() != 0) {
+                return {false, "Empty tree has non-zero record count: " + std::to_string(GetRecordCount())};
+            }
+            if (GetDepth() != 0) {
+                return {false, "Empty tree has non-zero depth: " + std::to_string(GetDepth())};
+            }
+            return {true, "", 0, 0, 0, 0};
+        }
+
+        // 1. Validate Root Frame
+        Page *root_frame = bpm_->FetchPage(root_pid);
+        if (root_frame == nullptr) {
+            return {false, "Failed to fetch root page frame " + std::to_string(root_pid)};
+        }
+
+        auto *root_page = BPlusTreePage::Cast(root_frame);
+        if (root_page->GetParentPageId() != INVALID_PAGE_ID) {
+            bpm_->UnpinPage(root_pid, false);
+            return {false, "Root page has invalid parent_page_id: " + std::to_string(root_page->GetParentPageId())};
+        }
+
+        if (root_page->IsLeafPage()) {
+            if (root_page->GetSize() < 1 || root_page->GetSize() > leaf_max_size_) {
+                bpm_->UnpinPage(root_pid, false);
+                return {false, "Root leaf page size out of bounds: " + std::to_string(root_page->GetSize())};
+            }
+        } else if (root_page->IsInternalPage()) {
+            if (root_page->GetSize() < 2 || root_page->GetSize() > internal_max_size_) {
+                bpm_->UnpinPage(root_pid, false);
+                return {false, "Root internal page size out of bounds: " + std::to_string(root_page->GetSize())};
+            }
+        } else {
+            bpm_->UnpinPage(root_pid, false);
+            return {false, "Root page has invalid page type"};
+        }
+        bpm_->UnpinPage(root_pid, false);
+
+        // 2. BFS Traversal to validate Sortedness, Occupancy, Parent Pointers, and Bounds
+        struct BFSItem {
+            page_id_t page_id;
+            uint32_t depth;
+            std::optional<KeyType> lower_bound;
+            std::optional<KeyType> upper_bound;
+        };
+
+        std::queue<BFSItem> q;
+        std::unordered_set<page_id_t> visited_pages;
+        std::set<page_id_t> hierarchy_leaves;
+        size_t hierarchy_key_count = 0;
+        size_t leaf_page_count = 0;
+        size_t internal_page_count = 0;
+        uint32_t observed_leaf_depth = 0;
+
+        q.push({root_pid, 1, std::nullopt, std::nullopt});
+        visited_pages.insert(root_pid);
+
+        while (!q.empty()) {
+            BFSItem item = q.front();
+            q.pop();
+
+            Page *frame = bpm_->FetchPage(item.page_id);
+            if (frame == nullptr) {
+                return {false, "Failed to fetch page " + std::to_string(item.page_id) + " during validation"};
+            }
+
+            auto *page = BPlusTreePage::Cast(frame);
+
+            if (page->IsLeafPage()) {
+                auto *leaf = LeafPage::Cast(frame);
+                leaf_page_count++;
+
+                // Leaf depth consistency check
+                if (observed_leaf_depth == 0) {
+                    observed_leaf_depth = item.depth;
+                } else if (observed_leaf_depth != item.depth) {
+                    bpm_->UnpinPage(item.page_id, false);
+                    return {false, "Leaf page " + std::to_string(item.page_id) + " at depth "
+                                   + std::to_string(item.depth) + " but expected depth " + std::to_string(observed_leaf_depth)};
+                }
+
+                // Occupancy check
+                if (item.page_id != root_pid) {
+                    int min_leaf = leaf_max_size_ / 2;
+                    if (leaf->GetSize() < min_leaf || leaf->GetSize() > leaf_max_size_) {
+                        bpm_->UnpinPage(item.page_id, false);
+                        return {false, "Leaf page " + std::to_string(item.page_id) + " occupancy violation: size "
+                                       + std::to_string(leaf->GetSize()) + " not in [" + std::to_string(min_leaf) + ", "
+                                       + std::to_string(leaf_max_size_) + "]"};
+                    }
+                }
+
+                // Sortedness check within leaf & subtree bounds check
+                for (int i = 0; i < leaf->GetSize(); ++i) {
+                    const KeyType &k = leaf->KeyAt(i);
+                    if (item.lower_bound.has_value() && Compare(comparator_, k, *item.lower_bound) < 0) {
+                        bpm_->UnpinPage(item.page_id, false);
+                        return {false, "Key in leaf " + std::to_string(item.page_id) + " violates lower bound"};
+                    }
+                    if (item.upper_bound.has_value() && Compare(comparator_, k, *item.upper_bound) >= 0) {
+                        bpm_->UnpinPage(item.page_id, false);
+                        return {false, "Key in leaf " + std::to_string(item.page_id) + " violates upper bound"};
+                    }
+                    if (i > 0 && Compare(comparator_, leaf->KeyAt(i - 1), k) >= 0) {
+                        bpm_->UnpinPage(item.page_id, false);
+                        return {false, "Leaf " + std::to_string(item.page_id) + " keys not strictly ascending"};
+                    }
+                }
+
+                hierarchy_leaves.insert(item.page_id);
+                hierarchy_key_count += leaf->GetSize();
+                bpm_->UnpinPage(item.page_id, false);
+
+            } else if (page->IsInternalPage()) {
+                auto *internal = InternalPage::Cast(frame);
+                internal_page_count++;
+
+                // Occupancy check
+                if (item.page_id != root_pid) {
+                    int min_internal = (internal_max_size_ + 1) / 2;
+                    if (internal->GetSize() < min_internal || internal->GetSize() > internal_max_size_) {
+                        bpm_->UnpinPage(item.page_id, false);
+                        return {false, "Internal page " + std::to_string(item.page_id) + " occupancy violation: size "
+                                       + std::to_string(internal->GetSize()) + " not in [" + std::to_string(min_internal) + ", "
+                                       + std::to_string(internal_max_size_) + "]"};
+                    }
+                }
+
+                // Sortedness check within internal node
+                for (int i = 1; i < internal->GetSize(); ++i) {
+                    const KeyType &k = internal->KeyAt(i);
+                    if (item.lower_bound.has_value() && Compare(comparator_, k, *item.lower_bound) < 0) {
+                        bpm_->UnpinPage(item.page_id, false);
+                        return {false, "Separator key in internal page " + std::to_string(item.page_id) + " violates lower bound"};
+                    }
+                    if (item.upper_bound.has_value() && Compare(comparator_, k, *item.upper_bound) >= 0) {
+                        bpm_->UnpinPage(item.page_id, false);
+                        return {false, "Separator key in internal page " + std::to_string(item.page_id) + " violates upper bound"};
+                    }
+                    if (i > 1 && Compare(comparator_, internal->KeyAt(i - 1), k) >= 0) {
+                        bpm_->UnpinPage(item.page_id, false);
+                        return {false, "Internal page " + std::to_string(item.page_id) + " keys not strictly ascending"};
+                    }
+                }
+
+                // Validate parent pointers of all children
+                for (int i = 0; i < internal->GetSize(); ++i) {
+                    page_id_t child_pid = internal->ValueAt(i);
+                    if (child_pid == INVALID_PAGE_ID) {
+                        bpm_->UnpinPage(item.page_id, false);
+                        return {false, "Internal page " + std::to_string(item.page_id) + " has child pointer INVALID_PAGE_ID"};
+                    }
+                    if (visited_pages.count(child_pid)) {
+                        bpm_->UnpinPage(item.page_id, false);
+                        return {false, "Cycle detected in tree: page " + std::to_string(child_pid) + " visited twice"};
+                    }
+                    visited_pages.insert(child_pid);
+
+                    Page *child_frame = bpm_->FetchPage(child_pid);
+                    if (child_frame == nullptr) {
+                        bpm_->UnpinPage(item.page_id, false);
+                        return {false, "Failed to fetch child page " + std::to_string(child_pid)};
+                    }
+                    auto *child_page = BPlusTreePage::Cast(child_frame);
+                    if (child_page->GetParentPageId() != item.page_id) {
+                        page_id_t actual_parent = child_page->GetParentPageId();
+                        bpm_->UnpinPage(child_pid, false);
+                        bpm_->UnpinPage(item.page_id, false);
+                        return {false, "Parent pointer mismatch: child " + std::to_string(child_pid)
+                                       + " has parent " + std::to_string(actual_parent) + " but expected " + std::to_string(item.page_id)};
+                    }
+                    bpm_->UnpinPage(child_pid, false);
+
+                    std::optional<KeyType> child_lower = (i == 0) ? item.lower_bound : std::make_optional(internal->KeyAt(i));
+                    std::optional<KeyType> child_upper = (i == internal->GetSize() - 1) ? item.upper_bound : std::make_optional(internal->KeyAt(i + 1));
+                    q.push({child_pid, item.depth + 1, child_lower, child_upper});
+                }
+
+                bpm_->UnpinPage(item.page_id, false);
+            }
+        }
+
+        // 3. Validate Leaf Chain (Sequential Linked List)
+        Page *leftmost_frame = FindLeafPage(KeyType{}, true);
+        if (leftmost_frame == nullptr) {
+            return {false, "FindLeafPage failed to find leftmost leaf page"};
+        }
+        page_id_t curr_leaf_pid = leftmost_frame->GetPageId();
+        bpm_->UnpinPage(curr_leaf_pid, false);
+
+        std::set<page_id_t> chain_leaves;
+        std::optional<KeyType> prev_max_key;
+        size_t chain_key_count = 0;
+
+        while (curr_leaf_pid != INVALID_PAGE_ID) {
+            if (chain_leaves.count(curr_leaf_pid)) {
+                return {false, "Cycle detected in leaf next-pointer chain at page " + std::to_string(curr_leaf_pid)};
+            }
+            chain_leaves.insert(curr_leaf_pid);
+
+            Page *leaf_frame = bpm_->FetchPage(curr_leaf_pid);
+            if (leaf_frame == nullptr) {
+                return {false, "Failed to fetch leaf page " + std::to_string(curr_leaf_pid) + " in chain"};
+            }
+
+            auto *leaf = LeafPage::Cast(leaf_frame);
+            if (!leaf->IsLeafPage()) {
+                bpm_->UnpinPage(curr_leaf_pid, false);
+                return {false, "Page " + std::to_string(curr_leaf_pid) + " in leaf chain is not a leaf page"};
+            }
+
+            // Check key ordering across adjacent leaves
+            if (leaf->GetSize() > 0) {
+                if (prev_max_key.has_value() && Compare(comparator_, *prev_max_key, leaf->KeyAt(0)) >= 0) {
+                    bpm_->UnpinPage(curr_leaf_pid, false);
+                    return {false, "Key ordering violation across leaf boundary between previous leaf and leaf " + std::to_string(curr_leaf_pid)};
+                }
+                prev_max_key = leaf->KeyAt(leaf->GetSize() - 1);
+            }
+
+            chain_key_count += leaf->GetSize();
+            page_id_t next_pid = leaf->GetNextPageId();
+            bpm_->UnpinPage(curr_leaf_pid, false);
+            curr_leaf_pid = next_pid;
+        }
+
+        // Cross-check hierarchy leaves vs chain leaves
+        if (chain_leaves != hierarchy_leaves) {
+            return {false, "Mismatch between leaves found via tree hierarchy (" + std::to_string(hierarchy_leaves.size())
+                           + ") and leaf chain (" + std::to_string(chain_leaves.size()) + ")"};
+        }
+
+        // Cross-check record counts
+        if (chain_key_count != hierarchy_key_count) {
+            return {false, "Key count mismatch between hierarchy (" + std::to_string(hierarchy_key_count)
+                           + ") and leaf chain (" + std::to_string(chain_key_count) + ")"};
+        }
+
+        if (chain_key_count != GetRecordCount()) {
+            return {false, "Record count in header (" + std::to_string(GetRecordCount())
+                           + ") does not match indexed keys (" + std::to_string(chain_key_count) + ")"};
+        }
+
+        // Depth check
+        if (observed_leaf_depth != GetDepth()) {
+            return {false, "Computed depth (" + std::to_string(observed_leaf_depth)
+                           + ") does not match header depth (" + std::to_string(GetDepth()) + ")"};
+        }
+
+        return {true, "", chain_key_count, leaf_page_count, internal_page_count, observed_leaf_depth};
+    }
+
+    /**
+     * @brief Convenience helper returning true if tree is valid, false otherwise.
+     * @param error_out Optional string pointer to receive error description on failure.
+     */
+    bool CheckIntegrity(std::string *error_out = nullptr) const {
+        auto res = ValidateTree();
+        if (error_out != nullptr && !res.is_valid) {
+            *error_out = res.error_message;
+        }
+        return res.is_valid;
+    }
+
+    /**
+     * @brief Output the B+ Tree structure in Graphviz DOT format to an output stream.
+     *
+     * Nodes are rendered with distinct styles for internal and leaf nodes, showing page IDs,
+     * types, sizes, parents, keys, values, and child pointer ports. Directed edges show the
+     * hierarchical tree structure, and dashed green edges show the sequential leaf chain.
+     *
+     * @param out Output stream.
+     */
+    void ToDot(std::ostream &out) const {
+        std::shared_lock<std::shared_mutex> lock(*rwlock_);
+
+        page_id_t root_pid = GetRootPageId();
+        if (root_pid == INVALID_PAGE_ID || bpm_ == nullptr) {
+            out << "digraph BPlusTree {\n";
+            out << "  labelloc=\"t\";\n";
+            out << "  label=\"B+ Tree: " << name_ << " (Empty)\";\n";
+            out << "}\n";
+            return;
+        }
+
+        out << "digraph BPlusTree {\n";
+        out << "  rankdir=TB;\n";
+        out << "  node [shape=record, fontname=\"Courier\", fontsize=10];\n";
+        out << "  edge [fontname=\"Courier\", fontsize=9];\n";
+        out << "  labelloc=\"t\";\n";
+        out << "  label=\"B+ Tree: " << name_ << " (Depth: " << GetDepth()
+            << ", Records: " << GetRecordCount() << ", Root Page: " << root_pid << ")\";\n\n";
+
+        std::queue<page_id_t> q;
+        std::vector<page_id_t> leaf_pids;
+        std::unordered_set<page_id_t> visited;
+
+        q.push(root_pid);
+        visited.insert(root_pid);
+
+        while (!q.empty()) {
+            page_id_t pid = q.front();
+            q.pop();
+
+            Page *frame = bpm_->FetchPage(pid);
+            if (frame == nullptr) continue;
+
+            auto *page = BPlusTreePage::Cast(frame);
+
+            if (page->IsInternalPage()) {
+                auto *internal = InternalPage::Cast(frame);
+
+                out << "  page_" << pid << " [label=\"{Page " << pid
+                    << " | Type: Internal | Size: " << internal->GetSize() << "/" << internal->GetMaxSize()
+                    << " | Parent: " << internal->GetParentPageId() << "} | {";
+
+                out << "<p0>";
+                for (int i = 1; i < internal->GetSize(); ++i) {
+                    out << " | " << FormatForDot(internal->KeyAt(i)) << " | <p" << i << ">";
+                }
+                out << "}\", style=filled, fillcolor=\"#E8EEF5\"];\n";
+
+                for (int i = 0; i < internal->GetSize(); ++i) {
+                    page_id_t child_pid = internal->ValueAt(i);
+                    out << "  page_" << pid << ":p" << i << " -> page_" << child_pid << ";\n";
+                    if (visited.insert(child_pid).second) {
+                        q.push(child_pid);
+                    }
+                }
+            } else if (page->IsLeafPage()) {
+                auto *leaf = LeafPage::Cast(frame);
+                leaf_pids.push_back(pid);
+
+                out << "  page_" << pid << " [label=\"{Page " << pid
+                    << " | Type: Leaf | Size: " << leaf->GetSize() << "/" << leaf->GetMaxSize()
+                    << " | Parent: " << leaf->GetParentPageId()
+                    << " | Next: " << leaf->GetNextPageId() << "} | {";
+
+                for (int i = 0; i < leaf->GetSize(); ++i) {
+                    if (i > 0) out << " | ";
+                    out << FormatForDot(leaf->KeyAt(i)) << ": " << FormatForDot(leaf->ValueAt(i));
+                }
+                out << "}\", style=filled, fillcolor=\"#E8F5E9\"];\n";
+            }
+
+            bpm_->UnpinPage(pid, false);
+        }
+
+        out << "\n  // Sequential leaf chain edges\n";
+        for (page_id_t leaf_pid : leaf_pids) {
+            Page *frame = bpm_->FetchPage(leaf_pid);
+            if (frame != nullptr) {
+                auto *leaf = LeafPage::Cast(frame);
+                page_id_t next_pid = leaf->GetNextPageId();
+                if (next_pid != INVALID_PAGE_ID) {
+                    out << "  page_" << leaf_pid << " -> page_" << next_pid
+                        << " [style=dashed, color=\"#2E7D32\", constraint=false];\n";
+                }
+                bpm_->UnpinPage(leaf_pid, false);
+            }
+        }
+
+        out << "}\n";
+    }
+
+    /**
+     * @brief Return the Graphviz DOT representation as a std::string.
+     */
+    std::string ToDot() const {
+        std::ostringstream oss;
+        ToDot(oss);
+        return oss.str();
+    }
+
+    /**
+     * @brief Dump the Graphviz DOT representation to a file on disk.
+     * @param filename Target file path.
+     * @return true on success, false on I/O error.
+     */
+    bool DumpGraphviz(const std::string &filename) const {
+        std::ofstream fout(filename);
+        if (!fout.is_open()) return false;
+        ToDot(fout);
+        return fout.good();
+    }
+
+private:
+    template <typename T>
+    static std::string FormatForDot(const T &val) {
+        if constexpr (std::is_same_v<T, RID>) {
+            return val.ToString();
+        } else {
+            std::ostringstream oss;
+            oss << val;
+            std::string s = oss.str();
+            std::string escaped;
+            for (char c : s) {
+                if (c == '{' || c == '}' || c == '|' || c == '<' || c == '>' || c == '"' || c == '\\') {
+                    escaped += '\\';
+                }
+                escaped += c;
+            }
+            return escaped;
         }
     }
 

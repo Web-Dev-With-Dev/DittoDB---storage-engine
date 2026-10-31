@@ -1108,3 +1108,193 @@ TEST_F(BPlusTreeTest, PingPongInsertsSmallFanoutSplits) {
     AssertAllPagesUnpinned();
 }
 
+// ============================================================================
+// Test 19: Tree Validator on Empty Tree and Single Leaf Root
+// ============================================================================
+TEST_F(BPlusTreeTest, TreeValidatorOnEmptyAndSingleNode) {
+    BPlusTree<int, RID> tree("validator_empty_single", bpm_.get(), std::less<int>{}, 4, 4);
+
+    // 1. Empty tree validation
+    TreeValidationResult empty_res = tree.ValidateTree();
+    EXPECT_TRUE(empty_res.is_valid);
+    EXPECT_TRUE(empty_res.error_message.empty());
+    EXPECT_EQ(empty_res.total_keys, 0u);
+    EXPECT_EQ(empty_res.leaf_page_count, 0u);
+    EXPECT_EQ(empty_res.internal_page_count, 0u);
+    EXPECT_EQ(empty_res.depth, 0u);
+    EXPECT_TRUE(tree.CheckIntegrity());
+    AssertAllPagesUnpinned();
+
+    // 2. Single leaf node with elements
+    EXPECT_TRUE(tree.Insert(10, RID(1, 10)));
+    EXPECT_TRUE(tree.Insert(20, RID(1, 20)));
+    EXPECT_TRUE(tree.Insert(30, RID(1, 30)));
+
+    TreeValidationResult single_res = tree.ValidateTree();
+    EXPECT_TRUE(single_res.is_valid);
+    EXPECT_TRUE(single_res.error_message.empty());
+    EXPECT_EQ(single_res.total_keys, 3u);
+    EXPECT_EQ(single_res.leaf_page_count, 1u);
+    EXPECT_EQ(single_res.internal_page_count, 0u);
+    EXPECT_EQ(single_res.depth, 1u);
+    EXPECT_TRUE(tree.CheckIntegrity());
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 20: Tree Validator on Full Multi-Level Tree Structure
+// ============================================================================
+TEST_F(BPlusTreeTest, TreeValidatorOnMultiLevelTree) {
+    // Small fanouts to build a multi-level tree with internal and leaf nodes
+    BPlusTree<int, RID> tree("validator_multilevel", bpm_.get(), std::less<int>{}, 3, 3);
+
+    for (int i = 1; i <= 60; ++i) {
+        ASSERT_TRUE(tree.Insert(i * 5, RID(1, static_cast<uint32_t>(i))));
+    }
+
+    TreeValidationResult res = tree.ValidateTree();
+    EXPECT_TRUE(res.is_valid);
+    EXPECT_TRUE(res.error_message.empty()) << "Validation failed: " << res.error_message;
+    EXPECT_EQ(res.total_keys, 60u);
+    EXPECT_GE(res.depth, 3u);
+    EXPECT_GT(res.leaf_page_count, 20u);
+    EXPECT_GT(res.internal_page_count, 5u);
+
+    std::string err;
+    EXPECT_TRUE(tree.CheckIntegrity(&err));
+    EXPECT_TRUE(err.empty());
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 21: Tree Validator Accurately Detects Structural Violations
+// ============================================================================
+TEST_F(BPlusTreeTest, TreeValidatorCatchesViolations) {
+    using LeafPage = BPlusTreeLeafPage<int, RID>;
+
+    // 1. Violation A: Corrupted Parent Pointer
+    {
+        BPlusTree<int, RID> tree("tamper_parent", bpm_.get(), std::less<int>{}, 3, 3);
+        for (int i = 1; i <= 10; ++i) {
+            tree.Insert(i * 10, RID(1, static_cast<uint32_t>(i)));
+        }
+        EXPECT_TRUE(tree.CheckIntegrity());
+
+        // Tamper with leftmost leaf's parent pointer
+        Page *leaf_frame = tree.FindLeafPage(10, true);
+        ASSERT_NE(leaf_frame, nullptr);
+        auto *leaf = LeafPage::Cast(leaf_frame);
+        page_id_t original_parent = leaf->GetParentPageId();
+        leaf->SetParentPageId(9999); // Corrupt parent ID
+        bpm_->UnpinPage(leaf_frame->GetPageId(), true);
+
+        // Validator must catch parent pointer mismatch
+        TreeValidationResult res = tree.ValidateTree();
+        EXPECT_FALSE(res.is_valid);
+        EXPECT_NE(res.error_message.find("Parent pointer mismatch"), std::string::npos);
+
+        // Restore to avoid leaving corrupted state
+        leaf_frame = bpm_->FetchPage(leaf->GetPageId());
+        leaf->SetParentPageId(original_parent);
+        bpm_->UnpinPage(leaf_frame->GetPageId(), true);
+        EXPECT_TRUE(tree.CheckIntegrity());
+        AssertAllPagesUnpinned();
+    }
+
+    // 2. Violation B: Corrupted In-Node Key Ordering
+    {
+        BPlusTree<int, RID> tree("tamper_keys", bpm_.get(), std::less<int>{}, 4, 4);
+        tree.Insert(10, RID(1, 10));
+        tree.Insert(20, RID(1, 20));
+        tree.Insert(30, RID(1, 30));
+        EXPECT_TRUE(tree.CheckIntegrity());
+
+        Page *root_frame = bpm_->FetchPage(tree.GetRootPageId());
+        auto *leaf = LeafPage::Cast(root_frame);
+        leaf->SetKeyAt(0, 50); // Unsorted: 50, 20, 30
+        bpm_->UnpinPage(tree.GetRootPageId(), true);
+
+        TreeValidationResult res = tree.ValidateTree();
+        EXPECT_FALSE(res.is_valid);
+        EXPECT_NE(res.error_message.find("keys not strictly ascending"), std::string::npos);
+
+        // Restore
+        root_frame = bpm_->FetchPage(tree.GetRootPageId());
+        leaf->SetKeyAt(0, 10);
+        bpm_->UnpinPage(tree.GetRootPageId(), true);
+        EXPECT_TRUE(tree.CheckIntegrity());
+        AssertAllPagesUnpinned();
+    }
+
+    // 3. Violation C: Severed Sequential Leaf Chain
+    {
+        BPlusTree<int, RID> tree("tamper_chain", bpm_.get(), std::less<int>{}, 3, 3);
+        for (int i = 1; i <= 8; ++i) {
+            tree.Insert(i * 10, RID(1, static_cast<uint32_t>(i)));
+        }
+        EXPECT_TRUE(tree.CheckIntegrity());
+
+        // Sever leaf chain from leftmost leaf
+        Page *leaf_frame = tree.FindLeafPage(10, true);
+        auto *leaf = LeafPage::Cast(leaf_frame);
+        page_id_t original_next = leaf->GetNextPageId();
+        leaf->SetNextPageId(INVALID_PAGE_ID);
+        bpm_->UnpinPage(leaf_frame->GetPageId(), true);
+
+        TreeValidationResult res = tree.ValidateTree();
+        EXPECT_FALSE(res.is_valid);
+        EXPECT_NE(res.error_message.find("Mismatch between leaves"), std::string::npos);
+
+        // Restore
+        leaf_frame = bpm_->FetchPage(leaf->GetPageId());
+        leaf->SetNextPageId(original_next);
+        bpm_->UnpinPage(leaf_frame->GetPageId(), true);
+        EXPECT_TRUE(tree.CheckIntegrity());
+        AssertAllPagesUnpinned();
+    }
+}
+
+// ============================================================================
+// Test 22: Graphviz DOT Dump String and File Output
+// ============================================================================
+TEST_F(BPlusTreeTest, GraphvizDumpOutputVerification) {
+    BPlusTree<int, RID> tree("graphviz_demo_tree", bpm_.get(), std::less<int>{}, 3, 3);
+
+    // 1. Empty tree DOT representation
+    std::string empty_dot = tree.ToDot();
+    EXPECT_NE(empty_dot.find("digraph BPlusTree"), std::string::npos);
+    EXPECT_NE(empty_dot.find("Empty"), std::string::npos);
+    AssertAllPagesUnpinned();
+
+    // 2. Populate tree with data
+    for (int i = 1; i <= 15; ++i) {
+        tree.Insert(i * 10, RID(1, static_cast<uint32_t>(i)));
+    }
+    AssertAllPagesUnpinned();
+
+    // 3. Multi-level tree DOT representation
+    std::string dot = tree.ToDot();
+    EXPECT_NE(dot.find("digraph BPlusTree"), std::string::npos);
+    EXPECT_NE(dot.find("rankdir=TB"), std::string::npos);
+    EXPECT_NE(dot.find("shape=record"), std::string::npos);
+    EXPECT_NE(dot.find("Type: Internal"), std::string::npos);
+    EXPECT_NE(dot.find("Type: Leaf"), std::string::npos);
+    EXPECT_NE(dot.find("style=dashed"), std::string::npos); // Leaf chain
+    EXPECT_NE(dot.find("color=\"#2E7D32\""), std::string::npos);
+
+    // 4. Dump to disk file
+    const std::string dot_file = "test_b_plus_tree.dot";
+    if (fs::exists(dot_file)) {
+        fs::remove(dot_file);
+    }
+
+    EXPECT_TRUE(tree.DumpGraphviz(dot_file));
+    EXPECT_TRUE(fs::exists(dot_file));
+    EXPECT_GT(fs::file_size(dot_file), 100u);
+
+    // Clean up temporary file
+    fs::remove(dot_file);
+    AssertAllPagesUnpinned();
+}
+
