@@ -863,3 +863,248 @@ TEST_F(BPlusTreeTest, InternalSplitAndRootSplitDepthProgression) {
 
     AssertAllPagesUnpinned();
 }
+
+// ============================================================================
+// Test 15: Ascending Inserts with Small Fanout (3, 3) Forcing Cascading Right Splits
+// ============================================================================
+TEST_F(BPlusTreeTest, AscendingInsertsSmallFanoutSplits) {
+    // Ultra-small fanouts: leaf_max_size = 3, internal_max_size = 3
+    BPlusTree<int, RID> tree("asc_small_fanout_tree", bpm_.get(), std::less<int>{}, 3, 3);
+
+    const int num_keys = 120;
+    for (int i = 1; i <= num_keys; ++i) {
+        bool ok = tree.Insert(i, RID(static_cast<uint32_t>(i / 10), static_cast<uint32_t>(i)));
+        ASSERT_TRUE(ok) << "Failed to insert ascending key " << i;
+    }
+
+    EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(num_keys));
+    EXPECT_GE(tree.GetDepth(), 4u); // Multiple cascading root splits occurred
+    AssertAllPagesUnpinned();
+
+    // 1. Verify point lookups for every single inserted key
+    for (int i = 1; i <= num_keys; ++i) {
+        RID found;
+        ASSERT_TRUE(tree.GetValue(i, &found)) << "Failed to find ascending key " << i;
+        EXPECT_EQ(found, RID(static_cast<uint32_t>(i / 10), static_cast<uint32_t>(i)));
+    }
+    AssertAllPagesUnpinned();
+
+    // 2. Negative lookups
+    RID missing;
+    EXPECT_FALSE(tree.GetValue(0, &missing));
+    EXPECT_FALSE(tree.GetValue(num_keys + 1, &missing));
+    EXPECT_FALSE(tree.GetValue(-99, &missing));
+    AssertAllPagesUnpinned();
+
+    // 3. Sequential scan through next-pointer leaf chain
+    Page *leaf_frame = tree.FindLeafPage(1, true); // Leftmost leaf
+    ASSERT_NE(leaf_frame, nullptr);
+    page_id_t curr_pid = leaf_frame->GetPageId();
+    bpm_->UnpinPage(curr_pid, false);
+
+    std::vector<int> scanned_keys;
+    while (curr_pid != INVALID_PAGE_ID) {
+        Page *p = bpm_->FetchPage(curr_pid);
+        ASSERT_NE(p, nullptr);
+        auto *leaf = BPlusTreeLeafPage<int, RID>::Cast(p);
+        for (int i = 0; i < leaf->GetSize(); ++i) {
+            scanned_keys.push_back(leaf->KeyAt(i));
+        }
+        page_id_t next_pid = leaf->GetNextPageId();
+        bpm_->UnpinPage(curr_pid, false);
+        curr_pid = next_pid;
+    }
+
+    ASSERT_EQ(scanned_keys.size(), static_cast<size_t>(num_keys));
+    for (int i = 0; i < num_keys; ++i) {
+        EXPECT_EQ(scanned_keys[i], i + 1);
+    }
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 16: Descending Inserts with Small Fanout (4, 3) Forcing Cascading Left Splits
+// ============================================================================
+TEST_F(BPlusTreeTest, DescendingInsertsSmallFanoutSplits) {
+    // Ultra-small fanouts: leaf_max_size = 4, internal_max_size = 3
+    BPlusTree<int, RID> tree("desc_small_fanout_tree", bpm_.get(), std::less<int>{}, 4, 3);
+
+    const int num_keys = 120;
+    // Insert descending: 120 down to 1
+    for (int i = num_keys; i >= 1; --i) {
+        bool ok = tree.Insert(i, RID(static_cast<uint32_t>(i), static_cast<uint32_t>(i * 2)));
+        ASSERT_TRUE(ok) << "Failed to insert descending key " << i;
+    }
+
+    EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(num_keys));
+    EXPECT_GE(tree.GetDepth(), 4u);
+    AssertAllPagesUnpinned();
+
+    // 1. Verify point lookups for every single inserted key
+    for (int i = 1; i <= num_keys; ++i) {
+        RID found;
+        ASSERT_TRUE(tree.GetValue(i, &found)) << "Failed to find descending key " << i;
+        EXPECT_EQ(found, RID(static_cast<uint32_t>(i), static_cast<uint32_t>(i * 2)));
+    }
+    AssertAllPagesUnpinned();
+
+    // 2. Sequential scan through next-pointer leaf chain from leftmost to rightmost
+    Page *leaf_frame = tree.FindLeafPage(1, true); // Leftmost leaf
+    ASSERT_NE(leaf_frame, nullptr);
+    page_id_t curr_pid = leaf_frame->GetPageId();
+    bpm_->UnpinPage(curr_pid, false);
+
+    std::vector<int> scanned_keys;
+    while (curr_pid != INVALID_PAGE_ID) {
+        Page *p = bpm_->FetchPage(curr_pid);
+        ASSERT_NE(p, nullptr);
+        auto *leaf = BPlusTreeLeafPage<int, RID>::Cast(p);
+        for (int i = 0; i < leaf->GetSize(); ++i) {
+            scanned_keys.push_back(leaf->KeyAt(i));
+        }
+        page_id_t next_pid = leaf->GetNextPageId();
+        bpm_->UnpinPage(curr_pid, false);
+        curr_pid = next_pid;
+    }
+
+    // Must still produce perfectly sorted order 1 .. 120!
+    ASSERT_EQ(scanned_keys.size(), static_cast<size_t>(num_keys));
+    for (int i = 0; i < num_keys; ++i) {
+        EXPECT_EQ(scanned_keys[i], i + 1);
+    }
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 17: Random Inserts with Small Fanouts (3, 4) Forcing Arbitrary Splits Across Levels
+// ============================================================================
+TEST_F(BPlusTreeTest, RandomInsertsSmallFanoutSplits) {
+    // Ultra-small fanouts: leaf_max_size = 3, internal_max_size = 4
+    BPlusTree<int, RID> tree("random_small_fanout_tree", bpm_.get(), std::less<int>{}, 3, 4);
+
+    const int num_keys = 250;
+    std::vector<int> keys(num_keys);
+    for (int i = 0; i < num_keys; ++i) {
+        keys[i] = (i + 1) * 3; // 3, 6, 9, ..., 750
+    }
+
+    std::mt19937 rng(424242);
+    std::shuffle(keys.begin(), keys.end(), rng);
+
+    // Insert all keys in random order
+    for (int k : keys) {
+        bool ok = tree.Insert(k, RID(static_cast<uint32_t>(k % 100), static_cast<uint32_t>(k)));
+        ASSERT_TRUE(ok) << "Failed to insert random key " << k;
+    }
+
+    EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(num_keys));
+    EXPECT_GE(tree.GetDepth(), 4u);
+    AssertAllPagesUnpinned();
+
+    // 1. Verify all inserted keys are found with exact values
+    for (int k : keys) {
+        RID found;
+        ASSERT_TRUE(tree.GetValue(k, &found)) << "Failed to find random key " << k;
+        EXPECT_EQ(found, RID(static_cast<uint32_t>(k % 100), static_cast<uint32_t>(k)));
+    }
+    AssertAllPagesUnpinned();
+
+    // 2. Duplicate rejection verification on random keys
+    for (size_t i = 0; i < 20; ++i) {
+        int dup_key = keys[i];
+        EXPECT_FALSE(tree.Insert(dup_key, RID(999, 999)))
+            << "Accepted duplicate key " << dup_key;
+        EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(num_keys));
+    }
+    AssertAllPagesUnpinned();
+
+    // 3. Verify leaf chain scan visits keys in sorted order 3, 6, 9, ...
+    std::vector<int> sorted_keys = keys;
+    std::sort(sorted_keys.begin(), sorted_keys.end());
+
+    Page *leftmost_frame = tree.FindLeafPage(sorted_keys.front(), true);
+    ASSERT_NE(leftmost_frame, nullptr);
+    page_id_t curr_pid = leftmost_frame->GetPageId();
+    bpm_->UnpinPage(curr_pid, false);
+
+    std::vector<int> scanned_keys;
+    while (curr_pid != INVALID_PAGE_ID) {
+        Page *p = bpm_->FetchPage(curr_pid);
+        ASSERT_NE(p, nullptr);
+        auto *leaf = BPlusTreeLeafPage<int, RID>::Cast(p);
+        for (int i = 0; i < leaf->GetSize(); ++i) {
+            scanned_keys.push_back(leaf->KeyAt(i));
+        }
+        page_id_t next_pid = leaf->GetNextPageId();
+        bpm_->UnpinPage(curr_pid, false);
+        curr_pid = next_pid;
+    }
+
+    ASSERT_EQ(scanned_keys.size(), static_cast<size_t>(num_keys));
+    EXPECT_EQ(scanned_keys, sorted_keys);
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 18: Alternating Min/Max Ping-Pong Inserts with Small Fanout (4, 4)
+// ============================================================================
+TEST_F(BPlusTreeTest, PingPongInsertsSmallFanoutSplits) {
+    // Small fanout 4, 4
+    BPlusTree<int, RID> tree("ping_pong_tree", bpm_.get(), std::less<int>{}, 4, 4);
+
+    const int half_count = 80;
+    std::vector<int> inserted_keys;
+
+    // Alternately insert from low end and high end:
+    // low: 1, 2, ..., 80; high: 1000, 999, ..., 921
+    for (int i = 1; i <= half_count; ++i) {
+        int low_key = i;
+        int high_key = 1001 - i;
+
+        ASSERT_TRUE(tree.Insert(low_key, RID(1, static_cast<uint32_t>(low_key))));
+        inserted_keys.push_back(low_key);
+
+        ASSERT_TRUE(tree.Insert(high_key, RID(2, static_cast<uint32_t>(high_key))));
+        inserted_keys.push_back(high_key);
+    }
+
+    EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(half_count * 2));
+    EXPECT_GE(tree.GetDepth(), 3u);
+    AssertAllPagesUnpinned();
+
+    // Verify all keys
+    for (int k : inserted_keys) {
+        RID found;
+        ASSERT_TRUE(tree.GetValue(k, &found)) << "Failed to find ping-pong key " << k;
+        uint32_t expected_page = (k <= half_count) ? 1 : 2;
+        EXPECT_EQ(found, RID(expected_page, static_cast<uint32_t>(k)));
+    }
+    AssertAllPagesUnpinned();
+
+    // Leaf chain scan
+    std::sort(inserted_keys.begin(), inserted_keys.end());
+    Page *leaf_frame = tree.FindLeafPage(inserted_keys.front(), true);
+    ASSERT_NE(leaf_frame, nullptr);
+    page_id_t curr_pid = leaf_frame->GetPageId();
+    bpm_->UnpinPage(curr_pid, false);
+
+    std::vector<int> scanned_keys;
+    while (curr_pid != INVALID_PAGE_ID) {
+        Page *p = bpm_->FetchPage(curr_pid);
+        ASSERT_NE(p, nullptr);
+        auto *leaf = BPlusTreeLeafPage<int, RID>::Cast(p);
+        for (int i = 0; i < leaf->GetSize(); ++i) {
+            scanned_keys.push_back(leaf->KeyAt(i));
+        }
+        page_id_t next_pid = leaf->GetNextPageId();
+        bpm_->UnpinPage(curr_pid, false);
+        curr_pid = next_pid;
+    }
+
+    EXPECT_EQ(scanned_keys, inserted_keys);
+    AssertAllPagesUnpinned();
+}
+

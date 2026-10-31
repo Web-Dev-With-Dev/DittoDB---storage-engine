@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
-  <img src="https://img.shields.io/badge/Tests-258%2F258%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-262%2F262%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier%20Storage-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Sanitizers-TSan%20%7C%20Helgrind%20Clean-success.svg" alt="Sanitizers" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
@@ -414,7 +414,7 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 - **LRU-K Replacer:** Canonical sample test (frames 1..5), FIFO tie-breaking for frames with $< K$ accesses, post-eviction history wiping, idempotent `SetEvictable` calls, dynamic cold-to-hot queue migration.
 - **Buffer Pool Manager:** Canonical 10-page cycle, full 4096-byte randomized binary payloads with embedded null bytes (`\0`), `NewPage(nullptr)` parameter safety, sticky dirty bit persistence across interleaved unpins, unpinned dirty page deletion, and destructor flush persistence.
 
-### Test Suite Coverage Breakdown (258/258 Passing)
+### Test Suite Coverage Breakdown (262/262 Passing)
 
 | Test Suite | Tests | Features Covered |
 | :--- | :---: | :--- |
@@ -434,11 +434,11 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 | `BPlusTreeLeafPageTest` | 10 | Sorted (key, RID) array layout, next_page_id sequential linking, binary search lookup, sorted insert, duplicate rejection, split/merge helpers, custom comparators |
 | `GenericKeyTest` | 9 | GenericKey<N> layout, order-preserving integer/float/string serialization, memcmp-ready lexicographical encoding, GenericComparator, BPlusTreePageSizeEstimator capacity calculations, leaf/internal integration |
 | `BPlusTreeHeaderPageTest` | 5 | 4096-byte header layout, root page pointer persistence, crash/restart durability via BPM/DiskManager, tree depth & record accounting, isolated leaf & internal node transitions |
-| `BPlusTreeTest` | 14 | Empty tree insert, leaf with space insert, duplicate key rejection, leaf split with next-pointer chain & separator push-up, modular root split (`CreateNewRoot` & header sync), modular internal split (`Split(InternalPage*)` & reparenting), multi-level dynamic depth progression, root-to-leaf traversal, binary search GetValue, zero pin leaks, GenericKey, persistence |
+| `BPlusTreeTest` | 18 | Empty tree insert, leaf with space insert, duplicate key rejection, leaf split with next-pointer chain & separator push-up, modular root split (`CreateNewRoot`), modular internal split (`Split(InternalPage*)` & reparenting), multi-level dynamic depth progression, small fanouts (3-4) ascending right-splits, descending left-splits, random multi-level splits, alternating ping-pong splits, root-to-leaf traversal, binary search GetValue, zero pin leaks, GenericKey, persistence |
 
 ```
-100% tests passed, 0 tests failed out of 258
-Total Test time (real) = 14.74 sec
+100% tests passed, 0 tests failed out of 262
+Total Test time (real) = 13.19 sec
 ```
 
 ### ThreadSanitizer & Helgrind Verification
