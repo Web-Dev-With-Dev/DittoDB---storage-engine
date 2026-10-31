@@ -309,9 +309,10 @@ public:
 
     /**
      * @brief Insert a (key, value) pair into the B+ Tree.
-     * Handles empty tree initialization, sorted leaf insertion, leaf splits,
-     * parent internal node insertion, and root splits.
-     * All pages pinned during insertion are properly unpinned as dirty.
+     * - If tree is empty, delegates to InsertIntoEmptyTree.
+     * - If tree is non-empty, delegates to InsertIntoLeaf.
+     * - Rejects duplicate keys, returning false and leaving the tree unchanged.
+     * All pinned pages are cleanly unpinned.
      *
      * @param key Key to insert.
      * @param value Value to associate with key.
@@ -321,10 +322,48 @@ public:
         std::unique_lock<std::shared_mutex> lock(*rwlock_);
 
         if (IsEmpty()) {
-            return StartNewTree(key, value);
+            return InsertIntoEmptyTreeInternal(key, value);
         }
 
-        return InsertIntoLeaf(key, value);
+        return InsertIntoLeafInternal(key, value);
+    }
+
+    /**
+     * @brief Insert a key-value pair into an empty B+ Tree.
+     * Allocates the initial root leaf page, initializes it, updates the persistent
+     * header page (root_page_id, depth=1, record_count=1), and unpins as dirty.
+     *
+     * @param key Search key.
+     * @param value Associated value (RID).
+     * @return true on success, false if tree is not empty or BPM fails to allocate page.
+     */
+    bool InsertIntoEmptyTree(const KeyType &key, const ValueType &value) {
+        std::unique_lock<std::shared_mutex> lock(*rwlock_);
+        return InsertIntoEmptyTreeInternal(key, value);
+    }
+
+    /**
+     * @brief Alias for InsertIntoEmptyTree.
+     */
+    bool StartNewTree(const KeyType &key, const ValueType &value) {
+        return InsertIntoEmptyTree(key, value);
+    }
+
+    /**
+     * @brief Insert a key-value pair into the target leaf page.
+     * Traverses from root to target leaf node:
+     * - If duplicate key is found: unpins the leaf page (is_dirty = false) and returns false.
+     * - If leaf has available space: inserts maintaining sorted order, increments record count,
+     *   unpins the leaf page (is_dirty = true) and returns true.
+     * - If leaf is full: splits the leaf and propagates split upwards.
+     *
+     * @param key Key to insert.
+     * @param value Associated value (RID).
+     * @return true on successful insertion, false on duplicate or error.
+     */
+    bool InsertIntoLeaf(const KeyType &key, const ValueType &value) {
+        std::unique_lock<std::shared_mutex> lock(*rwlock_);
+        return InsertIntoLeafInternal(key, value);
     }
 
 private:
@@ -347,9 +386,13 @@ private:
     }
 
     /**
-     * @brief Initialize an empty tree by allocating the initial root leaf page.
+     * @brief Internal helper to initialize an empty tree by allocating the initial root leaf page.
      */
-    bool StartNewTree(const KeyType &key, const ValueType &value) {
+    bool InsertIntoEmptyTreeInternal(const KeyType &key, const ValueType &value) {
+        if (!IsEmpty()) {
+            return false;
+        }
+
         page_id_t root_pid = INVALID_PAGE_ID;
         Page *root_frame = bpm_->NewPage(&root_pid);
         if (root_frame == nullptr) {
@@ -368,9 +411,13 @@ private:
     }
 
     /**
-     * @brief Insert into target leaf page, splitting and propagating upwards if full.
+     * @brief Internal helper to insert into target leaf page, splitting and propagating upwards if full.
      */
-    bool InsertIntoLeaf(const KeyType &key, const ValueType &value) {
+    bool InsertIntoLeafInternal(const KeyType &key, const ValueType &value) {
+        if (IsEmpty()) {
+            return InsertIntoEmptyTreeInternal(key, value);
+        }
+
         Page *leaf_frame = FindLeafPage(key, false);
         if (leaf_frame == nullptr) {
             return false;

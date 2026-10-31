@@ -127,7 +127,151 @@ TEST_F(BPlusTreeTest, SingleLeafPointLookup) {
 }
 
 // ============================================================================
-// Test 3: Manually Constructed Multi-Level Tree (Traverse Root to Leaf)
+// Test 3: Insert into Empty Tree (Root Leaf Allocation & Metadata Initialization)
+// ============================================================================
+TEST_F(BPlusTreeTest, InsertIntoEmptyTree) {
+    BPlusTree<int, RID> tree("empty_insert_tree", bpm_.get(), std::less<int>{}, 10, 10);
+
+    // Initial state
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRootPageId(), INVALID_PAGE_ID);
+    EXPECT_EQ(tree.GetDepth(), 0u);
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+
+    // First insert into empty tree
+    bool success = tree.Insert(42, RID(10, 42));
+    EXPECT_TRUE(success);
+
+    // State after insertion
+    EXPECT_FALSE(tree.IsEmpty());
+    EXPECT_NE(tree.GetRootPageId(), INVALID_PAGE_ID);
+    EXPECT_EQ(tree.GetDepth(), 1u);
+    EXPECT_EQ(tree.GetRecordCount(), 1u);
+
+    // Verify root is a leaf page
+    Page *root_page = bpm_->FetchPage(tree.GetRootPageId());
+    ASSERT_NE(root_page, nullptr);
+    auto *leaf = BPlusTreeLeafPage<int, RID>::Cast(root_page);
+    EXPECT_TRUE(leaf->IsLeafPage());
+    EXPECT_EQ(leaf->GetSize(), 1);
+    EXPECT_EQ(leaf->KeyAt(0), 42);
+    EXPECT_EQ(leaf->ValueAt(0), RID(10, 42));
+    EXPECT_EQ(leaf->GetParentPageId(), INVALID_PAGE_ID);
+    bpm_->UnpinPage(tree.GetRootPageId(), false);
+
+    // Value lookup
+    RID found;
+    EXPECT_TRUE(tree.GetValue(42, &found));
+    EXPECT_EQ(found, RID(10, 42));
+
+    AssertAllPagesUnpinned();
+
+    // Direct invocation on already non-empty tree should return false
+    EXPECT_FALSE(tree.InsertIntoEmptyTree(99, RID(10, 99)));
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 4: Insert for a Leaf With Space (Maintaining Sorted Order)
+// ============================================================================
+TEST_F(BPlusTreeTest, InsertLeafWithSpaceSortedOrder) {
+    // Leaf capacity 10, internal capacity 10
+    BPlusTree<int, RID> tree("leaf_with_space_tree", bpm_.get(), std::less<int>{}, 10, 10);
+
+    // Insert keys in non-sorted, arbitrary order
+    std::vector<int> insert_keys = {50, 20, 80, 10, 40, 70, 30, 60};
+    for (size_t i = 0; i < insert_keys.size(); ++i) {
+        int key = insert_keys[i];
+        bool ok = tree.Insert(key, RID(1, static_cast<uint32_t>(key)));
+        EXPECT_TRUE(ok);
+        EXPECT_EQ(tree.GetRecordCount(), i + 1);
+        AssertAllPagesUnpinned();
+    }
+
+    // Verify tree has not split (single leaf root)
+    EXPECT_EQ(tree.GetDepth(), 1u);
+    EXPECT_EQ(tree.GetRecordCount(), 8u);
+
+    // Inspect underlying LeafPage array to verify strict ascending sort order
+    Page *root_frame = bpm_->FetchPage(tree.GetRootPageId());
+    ASSERT_NE(root_frame, nullptr);
+    auto *leaf = BPlusTreeLeafPage<int, RID>::Cast(root_frame);
+    EXPECT_EQ(leaf->GetSize(), 8);
+
+    std::vector<int> expected_sorted = {10, 20, 30, 40, 50, 60, 70, 80};
+    for (int i = 0; i < 8; ++i) {
+        EXPECT_EQ(leaf->KeyAt(i), expected_sorted[i]);
+        EXPECT_EQ(leaf->ValueAt(i), RID(1, static_cast<uint32_t>(expected_sorted[i])));
+    }
+    bpm_->UnpinPage(tree.GetRootPageId(), false);
+    AssertAllPagesUnpinned();
+
+    // Verify GetValue finds every key
+    for (int key : expected_sorted) {
+        RID found;
+        EXPECT_TRUE(tree.GetValue(key, &found));
+        EXPECT_EQ(found, RID(1, static_cast<uint32_t>(key)));
+        AssertAllPagesUnpinned();
+    }
+}
+
+// ============================================================================
+// Test 5: Duplicate Key Rejection & State Invariance
+// ============================================================================
+TEST_F(BPlusTreeTest, HandleDuplicateKeys) {
+    BPlusTree<int, RID> tree("duplicate_keys_tree", bpm_.get(), std::less<int>{}, 10, 10);
+
+    // 1. Initial insert into empty tree
+    EXPECT_TRUE(tree.Insert(100, RID(1, 100)));
+    EXPECT_EQ(tree.GetRecordCount(), 1u);
+
+    // 2. Immediate duplicate insert on root leaf
+    EXPECT_FALSE(tree.Insert(100, RID(999, 999))); // Different RID, same key
+    EXPECT_EQ(tree.GetRecordCount(), 1u);
+    AssertAllPagesUnpinned();
+
+    // Verify existing key's value was NOT overwritten
+    RID val;
+    EXPECT_TRUE(tree.GetValue(100, &val));
+    EXPECT_EQ(val, RID(1, 100));
+    AssertAllPagesUnpinned();
+
+    // 3. Insert additional keys into leaf with space
+    EXPECT_TRUE(tree.Insert(50, RID(1, 50)));
+    EXPECT_TRUE(tree.Insert(150, RID(1, 150)));
+    EXPECT_TRUE(tree.Insert(25, RID(1, 25)));
+    EXPECT_TRUE(tree.Insert(75, RID(1, 75)));
+    EXPECT_EQ(tree.GetRecordCount(), 5u);
+    AssertAllPagesUnpinned();
+
+    // 4. Attempt duplicate inserts for every single existing key
+    std::vector<int> existing_keys = {25, 50, 75, 100, 150};
+    for (int k : existing_keys) {
+        EXPECT_FALSE(tree.Insert(k, RID(888, 888)))
+            << "Tree erroneously accepted duplicate key " << k;
+        EXPECT_EQ(tree.GetRecordCount(), 5u);
+        AssertAllPagesUnpinned();
+
+        // Verify original value unchanged
+        RID retrieved;
+        EXPECT_TRUE(tree.GetValue(k, &retrieved));
+        EXPECT_EQ(retrieved, RID(1, static_cast<uint32_t>(k)));
+        AssertAllPagesUnpinned();
+    }
+
+    // 5. Verify non-duplicate insert still succeeds
+    EXPECT_TRUE(tree.Insert(60, RID(1, 60)));
+    EXPECT_EQ(tree.GetRecordCount(), 6u);
+    AssertAllPagesUnpinned();
+
+    // Attempt duplicate for 60
+    EXPECT_FALSE(tree.Insert(60, RID(777, 777)));
+    EXPECT_EQ(tree.GetRecordCount(), 6u);
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 6: Manually Constructed Multi-Level Tree (Traverse Root to Leaf)
 // ============================================================================
 TEST_F(BPlusTreeTest, ManualMultiLevelTreeTraversal) {
     using LeafPage = BPlusTreeLeafPage<int, RID>;
@@ -252,7 +396,7 @@ TEST_F(BPlusTreeTest, ManualMultiLevelTreeTraversal) {
 }
 
 // ============================================================================
-// Test 4: Dynamic Insert, Splits, and Large Scale GetValue Lookups
+// Test 7: Dynamic Insert, Splits, and Large Scale GetValue Lookups
 // ============================================================================
 TEST_F(BPlusTreeTest, DynamicInsertAndGetValueStress) {
     // Small capacities to trigger frequent leaf and internal splits
@@ -303,7 +447,7 @@ TEST_F(BPlusTreeTest, DynamicInsertAndGetValueStress) {
 }
 
 // ============================================================================
-// Test 5: Vector Overload Compatibility (CMU 15-445 Parity)
+// Test 8: Vector Overload Compatibility (CMU 15-445 Parity)
 // ============================================================================
 TEST_F(BPlusTreeTest, VectorGetValueOverload) {
     BPlusTree<int, RID> tree("vector_test", bpm_.get(), std::less<int>{}, 5, 5);
@@ -325,7 +469,7 @@ TEST_F(BPlusTreeTest, VectorGetValueOverload) {
 }
 
 // ============================================================================
-// Test 6: GenericKey and GenericComparator Integration
+// Test 9: GenericKey and GenericComparator Integration
 // ============================================================================
 TEST_F(BPlusTreeTest, GenericKeyGetValue) {
     using Key64 = GenericKey<8>;
@@ -357,7 +501,7 @@ TEST_F(BPlusTreeTest, GenericKeyGetValue) {
 }
 
 // ============================================================================
-// Test 7: Persistence and Crash Restart
+// Test 10: Persistence and Crash Restart
 // ============================================================================
 TEST_F(BPlusTreeTest, PersistenceAndRecovery) {
     page_id_t header_pid = INVALID_PAGE_ID;

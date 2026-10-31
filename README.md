@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
-  <img src="https://img.shields.io/badge/Tests-251%2F251%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-254%2F254%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier%20Storage-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Sanitizers-TSan%20%7C%20Helgrind%20Clean-success.svg" alt="Sanitizers" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
@@ -427,11 +427,11 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 | `BPlusTreeLeafPageTest` | 10 | Sorted (key, RID) array layout, next_page_id sequential linking, binary search lookup, sorted insert, duplicate rejection, split/merge helpers, custom comparators |
 | `GenericKeyTest` | 9 | GenericKey<N> layout, order-preserving integer/float/string serialization, memcmp-ready lexicographical encoding, GenericComparator, BPlusTreePageSizeEstimator capacity calculations, leaf/internal integration |
 | `BPlusTreeHeaderPageTest` | 5 | 4096-byte header layout, root page pointer persistence, crash/restart durability via BPM/DiskManager, tree depth & record accounting, isolated leaf & internal node transitions |
-| `BPlusTreeTest` | 7 | Root-to-leaf traversal, binary-search point lookup (GetValue), zero pin leaks verification, multi-level routing, GenericKey integration, disk crash persistence |
+| `BPlusTreeTest` | 10 | Empty tree insert, leaf with space insert, duplicate key rejection, root-to-leaf traversal, binary search GetValue, zero pin leaks, multi-level routing, GenericKey, persistence |
 
 ```
-100% tests passed, 0 tests failed out of 251
-Total Test time (real) = 14.19 sec
+100% tests passed, 0 tests failed out of 254
+Total Test time (real) = 12.66 sec
 ```
 
 ### ThreadSanitizer & Helgrind Verification
