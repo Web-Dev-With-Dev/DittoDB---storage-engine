@@ -23,6 +23,19 @@ if(ENABLE_TSAN)
     endif()
 endif()
 
+# ==================== Valgrind / Helgrind Compatibility ====================
+# Modern GCC (11+) defaults to DWARF-5 (-gdwarf-5), which uses DW_OP_convert (0x9b) and DW_OP_piece (0x93).
+# Valgrind's DWARF parser emits verbose 'unhandled DW_OP_ 0x9b' warnings when reading DWARF-5 var info.
+# Specifying -gdwarf-4 emits DWARF-4 format, completely eliminating these warnings.
+option(ENABLE_VALGRIND "Enable Valgrind / Helgrind compatibility flags (-gdwarf-4)" OFF)
+
+if(ENABLE_VALGRIND)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(STATUS "Enabling Valgrind / Helgrind compatibility (-gdwarf-4)")
+        add_compile_options(-gdwarf-4)
+    endif()
+endif()
+
 # ==================== Include Directories ====================
 include_directories(include)
 

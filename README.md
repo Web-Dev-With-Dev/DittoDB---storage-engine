@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
-  <img src="https://img.shields.io/badge/Tests-266%2F266%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-267%2F267%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier%20Storage-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Sanitizers-TSan%20%7C%20Helgrind%20Clean-success.svg" alt="Sanitizers" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
@@ -446,11 +446,11 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 | `BPlusTreeLeafPageTest` | 10 | Sorted (key, RID) array layout, next_page_id sequential linking, binary search lookup, sorted insert, duplicate rejection, split/merge helpers, custom comparators |
 | `GenericKeyTest` | 9 | GenericKey<N> layout, order-preserving integer/float/string serialization, memcmp-ready lexicographical encoding, GenericComparator, BPlusTreePageSizeEstimator capacity calculations, leaf/internal integration |
 | `BPlusTreeHeaderPageTest` | 5 | 4096-byte header layout, root page pointer persistence, crash/restart durability via BPM/DiskManager, tree depth & record accounting, isolated leaf & internal node transitions |
-| `BPlusTreeTest` | 22 | Empty tree insert, leaf with space insert, duplicate key rejection, leaf split with next-pointer chain & separator push-up, modular root split (`CreateNewRoot`), modular internal split (`Split(InternalPage*)` & reparenting), multi-level dynamic depth progression, small fanouts (3-4) ascending right-splits, descending left-splits, random multi-level splits, alternating ping-pong splits, structural invariant validator (`ValidateTree`), Graphviz DOT tree dump (`ToDot`, `DumpGraphviz`), root-to-leaf traversal, binary search GetValue, zero pin leaks, GenericKey, persistence |
+| `BPlusTreeTest` | 23 | Empty tree insert, leaf with space insert, duplicate key rejection, leaf split with next-pointer chain & separator push-up, modular root split (`CreateNewRoot`), modular internal split (`Split(InternalPage*)` & reparenting), multi-level dynamic depth progression, small fanouts (3-4) ascending right-splits, descending left-splits, random multi-level splits, alternating ping-pong splits, structural invariant validator (`ValidateTree`), Graphviz DOT tree dump (`ToDot`, `DumpGraphviz`), root-to-leaf traversal, binary search GetValue, zero pin leaks, GenericKey, persistence, comprehensive fanout matrix fuzzing |
 
 ```
-100% tests passed, 0 tests failed out of 266
-Total Test time (real) = 12.28 sec
+100% tests passed, 0 tests failed out of 267
+Total Test time (real) = 13.13 sec
 ```
 
 ### ThreadSanitizer & Helgrind Verification

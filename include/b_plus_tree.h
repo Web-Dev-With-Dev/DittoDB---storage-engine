@@ -217,25 +217,13 @@ public:
     // ==================== Tree Traversal ====================
 
     /**
-     * @brief Traverse the tree from root to leaf node for a given search key.
+     * @brief Find the leftmost leaf page starting from root by following child pointer 0 at each level.
+     * All traversed internal pages are unpinned immediately.
+     * The returned leaf page is pinned and must be unpinned by the caller.
      *
-     * Traversal Algorithm:
-     * 1. Fetches the root page into the buffer pool.
-     * 2. Loops while the current node is an internal node:
-     *    - Performs binary search via internal_page->Lookup(key, comparator) to select child pointer.
-     *    - Fetches child page into the buffer pool.
-     *    - IMMEDIATELY unpins the parent internal page frame.
-     *    - Advances current pointer to child page.
-     * 3. Upon reaching a leaf node, returns the pinned leaf page frame.
-     *
-     * Guarantee: Every internal page visited along the path is ALWAYS unpinned.
-     * The returned leaf page is pinned and MUST be unpinned by the caller.
-     *
-     * @param key Search key guiding routing.
-     * @param left_most If true, always routes to the leftmost child (ValueAt(0)).
-     * @return Page* Pointer to pinned leaf Page, or nullptr if tree is empty or fetch fails.
+     * @return Page* Pointer to pinned leftmost leaf Page, or nullptr if tree is empty or fetch fails.
      */
-    Page *FindLeafPage(const KeyType &key, bool left_most = false) const {
+    Page *FindLeftmostLeafPage() const {
         page_id_t curr_pid = GetRootPageId();
         if (curr_pid == INVALID_PAGE_ID || bpm_ == nullptr) {
             return nullptr;
@@ -249,12 +237,57 @@ public:
         auto *tree_page = BPlusTreePage::Cast(curr_page);
         while (!tree_page->IsLeafPage()) {
             auto *internal_page = InternalPage::Cast(curr_page);
-            page_id_t next_pid = INVALID_PAGE_ID;
-            if (left_most) {
-                next_pid = internal_page->ValueAt(0);
-            } else {
-                next_pid = internal_page->Lookup(key, comparator_);
+            page_id_t next_pid = internal_page->ValueAt(0);
+
+            if (next_pid == INVALID_PAGE_ID) {
+                bpm_->UnpinPage(curr_pid, false);
+                return nullptr;
             }
+
+            Page *next_page = bpm_->FetchPage(next_pid);
+            bpm_->UnpinPage(curr_pid, false);
+
+            if (next_page == nullptr) {
+                return nullptr;
+            }
+
+            curr_page = next_page;
+            curr_pid = next_pid;
+            tree_page = BPlusTreePage::Cast(curr_page);
+        }
+
+        return curr_page;
+    }
+
+    /**
+     * @brief Find the leaf page that can contain the given search key.
+     * Starts at the root page and traverses down to a leaf page via binary search on internal nodes.
+     * Unpins all visited internal pages immediately upon advancing to the child.
+     * Leaves the returned leaf page pinned with pin_count incremented by 1.
+     *
+     * @param key Search key.
+     * @param left_most If true, routes to the leftmost leaf page directly.
+     * @return Page* Pointer to pinned leaf Page, or nullptr if tree is empty or fetch fails.
+     */
+    Page *FindLeafPage(const KeyType &key, bool left_most = false) const {
+        if (left_most) {
+            return FindLeftmostLeafPage();
+        }
+
+        page_id_t curr_pid = GetRootPageId();
+        if (curr_pid == INVALID_PAGE_ID || bpm_ == nullptr) {
+            return nullptr;
+        }
+
+        Page *curr_page = bpm_->FetchPage(curr_pid);
+        if (curr_page == nullptr) {
+            return nullptr;
+        }
+
+        auto *tree_page = BPlusTreePage::Cast(curr_page);
+        while (!tree_page->IsLeafPage()) {
+            auto *internal_page = InternalPage::Cast(curr_page);
+            page_id_t next_pid = internal_page->Lookup(key, comparator_);
 
             if (next_pid == INVALID_PAGE_ID) {
                 bpm_->UnpinPage(curr_pid, false);
@@ -992,9 +1025,9 @@ public:
         }
 
         // 3. Validate Leaf Chain (Sequential Linked List)
-        Page *leftmost_frame = FindLeafPage(KeyType{}, true);
+        Page *leftmost_frame = FindLeftmostLeafPage();
         if (leftmost_frame == nullptr) {
-            return {false, "FindLeafPage failed to find leftmost leaf page"};
+            return {false, "FindLeftmostLeafPage failed to find leftmost leaf page"};
         }
         page_id_t curr_leaf_pid = leftmost_frame->GetPageId();
         bpm_->UnpinPage(curr_leaf_pid, false);

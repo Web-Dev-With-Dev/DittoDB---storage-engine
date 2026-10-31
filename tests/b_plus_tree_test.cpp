@@ -356,6 +356,9 @@ TEST_F(BPlusTreeTest, LeafSplitNextPointerAndSeparatorPushUp) {
         EXPECT_EQ(res, RID(1, static_cast<uint32_t>(k)));
     }
 
+    std::string err;
+    EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Test 6 integrity failed: " << err;
+
     AssertAllPagesUnpinned();
 }
 
@@ -514,6 +517,10 @@ TEST_F(BPlusTreeTest, DynamicInsertAndGetValueStress) {
     // Verify tree depth has increased beyond 1
     EXPECT_GT(tree.GetDepth(), 1u);
 
+    // Verify tree integrity
+    std::string err;
+    EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Stress tree integrity failed: " << err;
+
     // Point lookup for EVERY inserted key
     for (int k : keys) {
         RID found_rid;
@@ -586,6 +593,10 @@ TEST_F(BPlusTreeTest, GenericKeyGetValue) {
     EXPECT_FALSE(tree.GetValue(Key64::From(-99999LL), &found));
     EXPECT_FALSE(tree.GetValue(Key64::From(999LL), &found));
 
+    // Verify tree integrity
+    std::string err;
+    EXPECT_TRUE(tree.CheckIntegrity(&err)) << "GenericKey integrity failed: " << err;
+
     AssertAllPagesUnpinned();
 }
 
@@ -630,6 +641,9 @@ TEST_F(BPlusTreeTest, PersistenceAndRecovery) {
 
         RID missing;
         EXPECT_FALSE(tree.GetValue(9999, &missing));
+
+        std::string err;
+        EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Post-recovery integrity failed: " << err;
 
         for (size_t i = 0; i < bpm->GetPoolSize(); ++i) {
             Page *page = bpm->GetPage(static_cast<frame_id_t>(i));
@@ -861,6 +875,9 @@ TEST_F(BPlusTreeTest, InternalSplitAndRootSplitDepthProgression) {
     EXPECT_EQ(header->GetDepth(), tree.GetDepth());
     bpm_->UnpinPage(tree.GetHeaderPageId(), false);
 
+    std::string err;
+    EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Test 14 integrity failed: " << err;
+
     AssertAllPagesUnpinned();
 }
 
@@ -875,6 +892,8 @@ TEST_F(BPlusTreeTest, AscendingInsertsSmallFanoutSplits) {
     for (int i = 1; i <= num_keys; ++i) {
         bool ok = tree.Insert(i, RID(static_cast<uint32_t>(i / 10), static_cast<uint32_t>(i)));
         ASSERT_TRUE(ok) << "Failed to insert ascending key " << i;
+        std::string err;
+        ASSERT_TRUE(tree.CheckIntegrity(&err)) << "After inserting " << i << ": " << err;
     }
 
     EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(num_keys));
@@ -935,6 +954,8 @@ TEST_F(BPlusTreeTest, DescendingInsertsSmallFanoutSplits) {
     for (int i = num_keys; i >= 1; --i) {
         bool ok = tree.Insert(i, RID(static_cast<uint32_t>(i), static_cast<uint32_t>(i * 2)));
         ASSERT_TRUE(ok) << "Failed to insert descending key " << i;
+        std::string err;
+        ASSERT_TRUE(tree.CheckIntegrity(&err)) << "After inserting " << i << ": " << err;
     }
 
     EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(num_keys));
@@ -997,6 +1018,8 @@ TEST_F(BPlusTreeTest, RandomInsertsSmallFanoutSplits) {
     for (int k : keys) {
         bool ok = tree.Insert(k, RID(static_cast<uint32_t>(k % 100), static_cast<uint32_t>(k)));
         ASSERT_TRUE(ok) << "Failed to insert random key " << k;
+        std::string err;
+        ASSERT_TRUE(tree.CheckIntegrity(&err)) << "After inserting " << k << ": " << err;
     }
 
     EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(num_keys));
@@ -1066,9 +1089,12 @@ TEST_F(BPlusTreeTest, PingPongInsertsSmallFanoutSplits) {
 
         ASSERT_TRUE(tree.Insert(low_key, RID(1, static_cast<uint32_t>(low_key))));
         inserted_keys.push_back(low_key);
+        std::string err;
+        ASSERT_TRUE(tree.CheckIntegrity(&err)) << "After inserting low " << low_key << ": " << err;
 
         ASSERT_TRUE(tree.Insert(high_key, RID(2, static_cast<uint32_t>(high_key))));
         inserted_keys.push_back(high_key);
+        ASSERT_TRUE(tree.CheckIntegrity(&err)) << "After inserting high " << high_key << ": " << err;
     }
 
     EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(half_count * 2));
@@ -1296,5 +1322,70 @@ TEST_F(BPlusTreeTest, GraphvizDumpOutputVerification) {
     // Clean up temporary file
     fs::remove(dot_file);
     AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 23: Comprehensive Fanout Matrix Invariant Fuzzing
+// ============================================================================
+TEST_F(BPlusTreeTest, FuzzIntegrityAllFanouts) {
+    std::vector<std::pair<int, int>> fanouts = {
+        {3, 3}, {3, 4}, {4, 3}, {4, 4}, {4, 5}, {5, 4}, {5, 5}, {6, 6}, {7, 7}
+    };
+
+    for (auto [leaf_max, int_max] : fanouts) {
+        std::string tree_name = "fuzz_" + std::to_string(leaf_max) + "_" + std::to_string(int_max);
+        BPlusTree<int, RID> tree(tree_name, bpm_.get(), std::less<int>{}, leaf_max, int_max);
+
+        // Pattern 1: Ascending
+        for (int i = 1; i <= 60; ++i) {
+            ASSERT_TRUE(tree.Insert(i, RID(1, static_cast<uint32_t>(i))));
+            std::string err;
+            ASSERT_TRUE(tree.CheckIntegrity(&err))
+                << "Ascending fanout (" << leaf_max << "," << int_max << ") failed at " << i << ": " << err;
+        }
+
+        // Pattern 2: Ping Pong into existing
+        for (int i = 1; i <= 30; ++i) {
+            int k1 = 1000 + i;
+            int k2 = 500 - i;
+            ASSERT_TRUE(tree.Insert(k1, RID(2, static_cast<uint32_t>(k1))));
+            std::string err;
+            ASSERT_TRUE(tree.CheckIntegrity(&err))
+                << "Ping-pong fanout (" << leaf_max << "," << int_max << ") failed at k1=" << k1 << ": " << err;
+
+            ASSERT_TRUE(tree.Insert(k2, RID(2, static_cast<uint32_t>(k2))));
+            ASSERT_TRUE(tree.CheckIntegrity(&err))
+                << "Ping-pong fanout (" << leaf_max << "," << int_max << ") failed at k2=" << k2 << ": " << err;
+        }
+
+        // Pattern 3: Standalone Descending Tree
+        {
+            BPlusTree<int, RID> desc_tree("fuzz_desc_" + std::to_string(leaf_max) + "_" + std::to_string(int_max),
+                                          bpm_.get(), std::less<int>{}, leaf_max, int_max);
+            for (int i = 60; i >= 1; --i) {
+                ASSERT_TRUE(desc_tree.Insert(i, RID(3, static_cast<uint32_t>(i))));
+                std::string err;
+                ASSERT_TRUE(desc_tree.CheckIntegrity(&err))
+                    << "Descending fanout (" << leaf_max << "," << int_max << ") failed at " << i << ": " << err;
+            }
+        }
+
+        // Pattern 4: Standalone Random Tree
+        {
+            BPlusTree<int, RID> rand_tree("fuzz_rand_" + std::to_string(leaf_max) + "_" + std::to_string(int_max),
+                                          bpm_.get(), std::less<int>{}, leaf_max, int_max);
+            std::vector<int> rkeys(80);
+            std::iota(rkeys.begin(), rkeys.end(), 1);
+            std::mt19937 rng(9999 + leaf_max * 10 + int_max);
+            std::shuffle(rkeys.begin(), rkeys.end(), rng);
+            for (int rk : rkeys) {
+                ASSERT_TRUE(rand_tree.Insert(rk, RID(4, static_cast<uint32_t>(rk))));
+                std::string err;
+                ASSERT_TRUE(rand_tree.CheckIntegrity(&err))
+                    << "Random fanout (" << leaf_max << "," << int_max << ") failed at " << rk << ": " << err;
+            }
+        }
+        AssertAllPagesUnpinned();
+    }
 }
 
