@@ -639,3 +639,227 @@ TEST_F(BPlusTreeTest, PersistenceAndRecovery) {
         }
     }
 }
+
+// ============================================================================
+// Test 12: Direct Root Split and Header Metadata Update
+// ============================================================================
+TEST_F(BPlusTreeTest, DirectRootSplitAndHeaderUpdate) {
+    using LeafPage = BPlusTreeLeafPage<int, RID>;
+    using InternalPage = BPlusTreeInternalPage<int, page_id_t>;
+
+    BPlusTree<int, RID> tree("direct_root_split_tree", bpm_.get(), std::less<int>{}, 4, 4);
+
+    // 1. Allocate old root leaf and new sibling leaf
+    page_id_t left_pid = INVALID_PAGE_ID;
+    page_id_t right_pid = INVALID_PAGE_ID;
+    Page *left_frame = bpm_->NewPage(&left_pid);
+    Page *right_frame = bpm_->NewPage(&right_pid);
+    ASSERT_NE(left_frame, nullptr);
+    ASSERT_NE(right_frame, nullptr);
+
+    auto *left_leaf = LeafPage::Cast(left_frame);
+    left_leaf->Init(left_pid, INVALID_PAGE_ID, 4);
+    left_leaf->Insert(10, RID(1, 10));
+    left_leaf->Insert(20, RID(1, 20));
+
+    auto *right_leaf = LeafPage::Cast(right_frame);
+    right_leaf->Init(right_pid, INVALID_PAGE_ID, 4);
+    right_leaf->Insert(30, RID(1, 30));
+    right_leaf->Insert(40, RID(1, 40));
+
+    // Connect leaf chain
+    left_leaf->SetNextPageId(right_pid);
+
+    // Initial root setup
+    tree.SetRootPageId(left_pid);
+    EXPECT_EQ(tree.GetRootPageId(), left_pid);
+    EXPECT_EQ(tree.GetDepth(), 1u);
+
+    // 2. Perform CreateNewRoot (Root Split)
+    page_id_t new_root_pid = tree.CreateNewRoot(left_leaf, 30, right_leaf);
+    EXPECT_NE(new_root_pid, INVALID_PAGE_ID);
+    EXPECT_NE(new_root_pid, left_pid);
+    EXPECT_NE(new_root_pid, right_pid);
+
+    // 3. Verify in-memory tree state and persistent header page
+    EXPECT_EQ(tree.GetRootPageId(), new_root_pid);
+    EXPECT_EQ(tree.GetDepth(), 2u);
+
+    // Persistent header check
+    Page *header_frame = bpm_->FetchPage(tree.GetHeaderPageId());
+    ASSERT_NE(header_frame, nullptr);
+    auto *header = BPlusTreeHeaderPage::Cast(header_frame);
+    EXPECT_EQ(header->GetRootPageId(), new_root_pid);
+    EXPECT_EQ(header->GetDepth(), 2u);
+    bpm_->UnpinPage(tree.GetHeaderPageId(), false);
+
+    // 4. Verify parent pointers on both children were updated to new_root_pid
+    EXPECT_EQ(left_leaf->GetParentPageId(), new_root_pid);
+    EXPECT_EQ(right_leaf->GetParentPageId(), new_root_pid);
+
+    // 5. Inspect new root internal page
+    Page *root_frame = bpm_->FetchPage(new_root_pid);
+    ASSERT_NE(root_frame, nullptr);
+    auto *root_internal = InternalPage::Cast(root_frame);
+    EXPECT_TRUE(root_internal->IsInternalPage());
+    EXPECT_EQ(root_internal->GetSize(), 2);
+    EXPECT_EQ(root_internal->ValueAt(0), left_pid);
+    EXPECT_EQ(root_internal->KeyAt(1), 30);
+    EXPECT_EQ(root_internal->ValueAt(1), right_pid);
+    EXPECT_EQ(root_internal->GetParentPageId(), INVALID_PAGE_ID);
+    bpm_->UnpinPage(new_root_pid, false);
+
+    // Unpin leaf pages
+    bpm_->UnpinPage(left_pid, true);
+    bpm_->UnpinPage(right_pid, true);
+
+    // 6. Verify hierarchical GetValue works through the new root
+    RID found;
+    EXPECT_TRUE(tree.GetValue(10, &found));
+    EXPECT_EQ(found, RID(1, 10));
+    EXPECT_TRUE(tree.GetValue(30, &found));
+    EXPECT_EQ(found, RID(1, 30));
+    EXPECT_FALSE(tree.GetValue(99, &found));
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 13: Direct Internal Node Split and Child Reparenting
+// ============================================================================
+TEST_F(BPlusTreeTest, DirectInternalNodeSplitAndReparenting) {
+    using LeafPage = BPlusTreeLeafPage<int, RID>;
+    using InternalPage = BPlusTreeInternalPage<int, page_id_t>;
+
+    BPlusTree<int, RID> tree("direct_internal_split_tree", bpm_.get(), std::less<int>{}, 4, 4);
+
+    // 1. Allocate 4 children pages (P0, P1, P2, P3)
+    std::vector<page_id_t> child_pids(4);
+    for (int i = 0; i < 4; ++i) {
+        Page *cp = bpm_->NewPage(&child_pids[i]);
+        ASSERT_NE(cp, nullptr);
+        auto *leaf = LeafPage::Cast(cp);
+        leaf->Init(child_pids[i], INVALID_PAGE_ID, 4);
+        leaf->Insert((i + 1) * 10, RID(1, static_cast<uint32_t>((i + 1) * 10)));
+        bpm_->UnpinPage(child_pids[i], true);
+    }
+
+    // 2. Allocate an internal node and fill to capacity (size = 4):
+    // array_[0] = (dummy, P0)
+    // array_[1] = (20, P1)
+    // array_[2] = (30, P2)
+    // array_[3] = (40, P3)
+    page_id_t internal_pid = INVALID_PAGE_ID;
+    Page *internal_frame = bpm_->NewPage(&internal_pid);
+    ASSERT_NE(internal_frame, nullptr);
+    auto *internal = InternalPage::Cast(internal_frame);
+    internal->Init(internal_pid, INVALID_PAGE_ID, 4);
+    internal->SetValueAt(0, child_pids[0]);
+    internal->SetKeyAt(1, 20);
+    internal->SetValueAt(1, child_pids[1]);
+    internal->SetKeyAt(2, 30);
+    internal->SetValueAt(2, child_pids[2]);
+    internal->SetKeyAt(3, 40);
+    internal->SetValueAt(3, child_pids[3]);
+    internal->SetSize(4);
+
+    // Set child parent pointers to internal_pid
+    for (int i = 0; i < 4; ++i) {
+        Page *cp = bpm_->FetchPage(child_pids[i]);
+        LeafPage::Cast(cp)->SetParentPageId(internal_pid);
+        bpm_->UnpinPage(child_pids[i], true);
+    }
+
+    // 3. Call tree.Split(internal)
+    InternalPage *new_internal = tree.Split(internal);
+    ASSERT_NE(new_internal, nullptr);
+    page_id_t new_internal_pid = new_internal->GetPageId();
+    EXPECT_NE(new_internal_pid, internal_pid);
+
+    // 4. Verify distribution of entries:
+    // Left internal retains lower half (mid = 2 entries: P0 and (20, P1))
+    EXPECT_EQ(internal->GetSize(), 2);
+    EXPECT_EQ(internal->ValueAt(0), child_pids[0]);
+    EXPECT_EQ(internal->KeyAt(1), 20);
+    EXPECT_EQ(internal->ValueAt(1), child_pids[1]);
+
+    // Right internal receives upper half (2 entries: (30, P2) as entry 0, and (40, P3) as entry 1)
+    EXPECT_EQ(new_internal->GetSize(), 2);
+    EXPECT_EQ(new_internal->KeyAt(0), 30); // KeyAt(0) holds median split key for push-up
+    EXPECT_EQ(new_internal->ValueAt(0), child_pids[2]);
+    EXPECT_EQ(new_internal->KeyAt(1), 40);
+    EXPECT_EQ(new_internal->ValueAt(1), child_pids[3]);
+
+    // 5. Verify child reparenting:
+    // P0 and P1 must still point to internal_pid
+    for (int i = 0; i < 2; ++i) {
+        Page *cp = bpm_->FetchPage(child_pids[i]);
+        EXPECT_EQ(LeafPage::Cast(cp)->GetParentPageId(), internal_pid);
+        bpm_->UnpinPage(child_pids[i], false);
+    }
+
+    // P2 and P3 must now point to new_internal_pid!
+    for (int i = 2; i < 4; ++i) {
+        Page *cp = bpm_->FetchPage(child_pids[i]);
+        EXPECT_EQ(LeafPage::Cast(cp)->GetParentPageId(), new_internal_pid);
+        bpm_->UnpinPage(child_pids[i], false);
+    }
+
+    // Unpin internal pages
+    bpm_->UnpinPage(new_internal_pid, true);
+    bpm_->UnpinPage(internal_pid, true);
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 14: Full Dynamic Internal Split & Root Split Depth Progression
+// ============================================================================
+TEST_F(BPlusTreeTest, InternalSplitAndRootSplitDepthProgression) {
+    // Ultra-compact node sizes to force frequent internal splits and root splits:
+    // leaf_max_size = 3, internal_max_size = 3
+    BPlusTree<int, RID> tree("progression_tree", bpm_.get(), std::less<int>{}, 3, 3);
+
+    EXPECT_EQ(tree.GetDepth(), 0u);
+
+    // 1. Insert 3 elements -> single leaf root (depth = 1)
+    tree.Insert(10, RID(1, 10));
+    tree.Insert(20, RID(1, 20));
+    tree.Insert(30, RID(1, 30));
+    EXPECT_EQ(tree.GetDepth(), 1u);
+
+    // 2. Insert 4th element -> leaf split + root split (depth becomes 2)
+    tree.Insert(40, RID(1, 40));
+    EXPECT_EQ(tree.GetDepth(), 2u);
+    AssertAllPagesUnpinned();
+
+    // 3. Continue inserting to fill internal root:
+    // At leaf_max_size = 3, internal_max_size = 3:
+    // Internal root can hold at most 3 child pointers.
+    // When 4th child pointer is pushed up, internal root splits!
+    // Internal root split creates a new level-3 root!
+    for (int k = 50; k <= 120; k += 10) {
+        EXPECT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    EXPECT_GE(tree.GetDepth(), 3u);
+    EXPECT_EQ(tree.GetRecordCount(), 12u);
+    AssertAllPagesUnpinned();
+
+    // Verify all keys from 10 to 120 can be accurately retrieved
+    for (int k = 10; k <= 120; k += 10) {
+        RID res;
+        ASSERT_TRUE(tree.GetValue(k, &res)) << "Key " << k << " missing after internal splits";
+        EXPECT_EQ(res, RID(1, static_cast<uint32_t>(k)));
+    }
+
+    // Verify root ID in header matches tree's root ID
+    Page *header_frame = bpm_->FetchPage(tree.GetHeaderPageId());
+    ASSERT_NE(header_frame, nullptr);
+    auto *header = BPlusTreeHeaderPage::Cast(header_frame);
+    EXPECT_EQ(header->GetRootPageId(), tree.GetRootPageId());
+    EXPECT_EQ(header->GetDepth(), tree.GetDepth());
+    bpm_->UnpinPage(tree.GetHeaderPageId(), false);
+
+    AssertAllPagesUnpinned();
+}

@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
-  <img src="https://img.shields.io/badge/Tests-255%2F255%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-258%2F258%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier%20Storage-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Sanitizers-TSan%20%7C%20Helgrind%20Clean-success.svg" alt="Sanitizers" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
@@ -334,6 +334,13 @@ Point lookup locates the exact record associated with a key:
 - **Leaf Binary Search:** On reaching the leaf node, `leaf->Lookup(key, result, comparator_)` runs binary search in $O(\log M)$ time across the sorted `(key, RID)` entries.
 - **Strict Zero-Leak Unpinning Guarantee:** Every page accessed during traversal (the persistent `BPlusTreeHeaderPage`, all traversed internal nodes, and the final leaf node) is guaranteed to be unpinned with `is_dirty = false` before `GetValue` returns.
 
+#### 7. Split Algorithms & Tree Growth Topology
+The B+ Tree dynamically grows in depth through hierarchical splits:
+- **Leaf Split (`Split(LeafPage*)`):** When a leaf reaches `leaf_max_size_`, a new sibling leaf is allocated in `BufferPoolManager`. The upper half of entries are moved (`MoveHalfTo`), the sequential next-pointer chain is re-linked (`leaf -> new_leaf -> old_next`), and the lowest key of `new_leaf` is pushed up to the parent.
+- **Internal Node Split (`Split(InternalPage*)` & `SplitInternal`):** When an internal node reaches capacity, it splits child pointers and separator keys. The upper half moves to a newly allocated sibling internal page via `MoveHalfTo`. All child pages moved to the new sibling have their `parent_page_id` atomically reparented and unpinned dirty. The median key is pulled up to the parent.
+- **Root Split (`CreateNewRoot`):** When any root node (leaf or internal) splits, `CreateNewRoot` allocates a new internal root page, initializes it with `INVALID_PAGE_ID` parent, populates it with `(old_root_pid, separator_key, new_sibling_pid)`, updates parent pointers on both children, updates `root_page_id_`, synchronizes the persistent `BPlusTreeHeaderPage` with `depth + 1`, and unpins the new root dirty.
+- **Strict Pinning Invariant:** Every page fetched or created across recursive splits is guaranteed to be unpinned (`is_dirty = true` on mutations, `false` on errors).
+
 ---
 
 ## Key Engineering Trade-Offs
@@ -407,7 +414,7 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 - **LRU-K Replacer:** Canonical sample test (frames 1..5), FIFO tie-breaking for frames with $< K$ accesses, post-eviction history wiping, idempotent `SetEvictable` calls, dynamic cold-to-hot queue migration.
 - **Buffer Pool Manager:** Canonical 10-page cycle, full 4096-byte randomized binary payloads with embedded null bytes (`\0`), `NewPage(nullptr)` parameter safety, sticky dirty bit persistence across interleaved unpins, unpinned dirty page deletion, and destructor flush persistence.
 
-### Test Suite Coverage Breakdown (251/251 Passing)
+### Test Suite Coverage Breakdown (258/258 Passing)
 
 | Test Suite | Tests | Features Covered |
 | :--- | :---: | :--- |
@@ -427,11 +434,11 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 | `BPlusTreeLeafPageTest` | 10 | Sorted (key, RID) array layout, next_page_id sequential linking, binary search lookup, sorted insert, duplicate rejection, split/merge helpers, custom comparators |
 | `GenericKeyTest` | 9 | GenericKey<N> layout, order-preserving integer/float/string serialization, memcmp-ready lexicographical encoding, GenericComparator, BPlusTreePageSizeEstimator capacity calculations, leaf/internal integration |
 | `BPlusTreeHeaderPageTest` | 5 | 4096-byte header layout, root page pointer persistence, crash/restart durability via BPM/DiskManager, tree depth & record accounting, isolated leaf & internal node transitions |
-| `BPlusTreeTest` | 11 | Empty tree insert, leaf with space insert, duplicate key rejection, leaf split with next-pointer chain & separator push-up, root-to-leaf traversal, binary search GetValue, zero pin leaks, multi-level routing, GenericKey, persistence |
+| `BPlusTreeTest` | 14 | Empty tree insert, leaf with space insert, duplicate key rejection, leaf split with next-pointer chain & separator push-up, modular root split (`CreateNewRoot` & header sync), modular internal split (`Split(InternalPage*)` & reparenting), multi-level dynamic depth progression, root-to-leaf traversal, binary search GetValue, zero pin leaks, GenericKey, persistence |
 
 ```
-100% tests passed, 0 tests failed out of 255
-Total Test time (real) = 13.62 sec
+100% tests passed, 0 tests failed out of 258
+Total Test time (real) = 14.74 sec
 ```
 
 ### ThreadSanitizer & Helgrind Verification

@@ -253,6 +253,51 @@ public:
         return array_;
     }
 
+    // ==================== Split & Merge Redistribution Helpers ====================
+
+    /**
+     * @brief Move upper half of entries from this node into recipient during internal node split.
+     *
+     * In an internal node with size n:
+     * - Entries [0 .. move_start - 1] stay in this node (size = move_start).
+     * - Entries [move_start .. n - 1] move to recipient.
+     * - recipient->array_[0].second is set to array_[move_start].second (leftmost child of recipient).
+     * - recipient->array_[0].first is set to array_[move_start].first (stored as split separator key).
+     * - recipient->array_[1 .. move_count - 1] get array_[move_start + 1 .. n - 1].
+     * - If buffer pool manager is provided, reparents all moved children to recipient->GetPageId().
+     *
+     * @tparam BPM Buffer pool manager type (templated to avoid circular header dependencies).
+     * @param recipient Target sibling internal page.
+     * @param bpm Optional BufferPoolManager to update parent pointers of all moved child pages.
+     */
+    template <typename BPM = void>
+    void MoveHalfTo(BPlusTreeInternalPage *recipient, BPM *bpm = nullptr) {
+        assert(recipient != nullptr);
+        int total_size = GetSize();
+        int move_start = total_size / 2;
+        int move_count = total_size - move_start;
+
+        for (int i = 0; i < move_count; ++i) {
+            recipient->array_[i] = array_[move_start + i];
+        }
+
+        recipient->SetSize(move_count);
+        SetSize(move_start);
+
+        if constexpr (!std::is_same_v<BPM, void>) {
+            if (bpm != nullptr) {
+                for (int i = 0; i < move_count; ++i) {
+                    page_id_t child_pid = recipient->ValueAt(i);
+                    auto *child_frame = bpm->FetchPage(child_pid);
+                    if (child_frame != nullptr) {
+                        BPlusTreePage::Cast(child_frame)->SetParentPageId(recipient->GetPageId());
+                        bpm->UnpinPage(child_pid, true);
+                    }
+                }
+            }
+        }
+    }
+
 private:
     /**
      * @brief Universal 3-way comparator helper supporting both bool comp(a,b) and int comp(a,b).
