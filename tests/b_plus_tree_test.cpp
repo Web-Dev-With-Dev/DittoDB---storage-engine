@@ -2061,3 +2061,310 @@ TEST_F(BPlusTreeTest, DirectInternalPageRedistributionPrimitives) {
     bpm_->DeletePage(p2_id);
     AssertAllPagesUnpinned();
 }
+
+// ============================================================================
+// Test 40: Workload 1 - Sequential Insert & Sequential Delete (Validate Every Op)
+// ============================================================================
+TEST_F(BPlusTreeTest, WorkloadSequentialInsertDeleteValidateEveryOp) {
+    // Small fanouts: leaf_max = 4, internal_max = 3 (forces splits, redistributions, and merges)
+    BPlusTree<int, RID> tree("workload_seq", bpm_.get(), std::less<int>{}, 4, 3);
+
+    const int total_keys = 35;
+
+    // 1. Sequential Insertions (1 .. total_keys)
+    for (int i = 1; i <= total_keys; ++i) {
+        ASSERT_TRUE(tree.Insert(i, RID(10, static_cast<uint32_t>(i))))
+            << "Insert failed at key " << i;
+        EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(i));
+
+        // Validate tree invariants after EVERY insert
+        std::string err;
+        ASSERT_TRUE(tree.CheckIntegrity(&err))
+            << "Integrity violation during sequential insert at key " << i << ": " << err;
+        auto val = tree.ValidateTree();
+        ASSERT_TRUE(val.is_valid)
+            << "Tree validation failure during sequential insert at key " << i << ": " << val.error_message;
+    }
+
+    // 2. Sequential Deletions (1 .. total_keys)
+    for (int i = 1; i <= total_keys; ++i) {
+        ASSERT_TRUE(tree.Remove(i))
+            << "Remove failed at key " << i;
+        EXPECT_FALSE(tree.Contains(i))
+            << "Key " << i << " still found after removal!";
+        EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(total_keys - i));
+
+        // Validate tree invariants after EVERY delete
+        std::string err;
+        ASSERT_TRUE(tree.CheckIntegrity(&err))
+            << "Integrity violation during sequential delete at key " << i << ": " << err;
+        auto val = tree.ValidateTree();
+        ASSERT_TRUE(val.is_valid)
+            << "Tree validation failure during sequential delete at key " << i << ": " << val.error_message;
+
+        // Verify all remaining keys (i + 1 .. total_keys) can be looked up
+        for (int rem = i + 1; rem <= std::min(total_keys, i + 5); ++rem) {
+            RID r;
+            EXPECT_TRUE(tree.GetValue(rem, &r));
+            EXPECT_EQ(r.GetSlotNum(), static_cast<uint32_t>(rem));
+        }
+    }
+
+    // Verify completely empty tree state
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetDepth(), 0u);
+    EXPECT_EQ(tree.GetRootPageId(), INVALID_PAGE_ID);
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 41: Workload 2 - Reverse Insert & Reverse Delete (Validate Every Op)
+// ============================================================================
+TEST_F(BPlusTreeTest, WorkloadReverseInsertDeleteValidateEveryOp) {
+    BPlusTree<int, RID> tree("workload_rev", bpm_.get(), std::less<int>{}, 4, 3);
+
+    const int total_keys = 35;
+
+    // 1. Reverse Insertions (total_keys down to 1)
+    for (int i = total_keys; i >= 1; --i) {
+        ASSERT_TRUE(tree.Insert(i, RID(20, static_cast<uint32_t>(i))))
+            << "Reverse insert failed at key " << i;
+
+        std::string err;
+        ASSERT_TRUE(tree.CheckIntegrity(&err))
+            << "Integrity violation during reverse insert at key " << i << ": " << err;
+        auto val = tree.ValidateTree();
+        ASSERT_TRUE(val.is_valid)
+            << "Tree validation failure during reverse insert at key " << i << ": " << val.error_message;
+    }
+
+    EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(total_keys));
+
+    // 2. Reverse Deletions (total_keys down to 1)
+    for (int i = total_keys; i >= 1; --i) {
+        ASSERT_TRUE(tree.Remove(i))
+            << "Reverse remove failed at key " << i;
+        EXPECT_FALSE(tree.Contains(i));
+
+        std::string err;
+        ASSERT_TRUE(tree.CheckIntegrity(&err))
+            << "Integrity violation during reverse delete at key " << i << ": " << err;
+        auto val = tree.ValidateTree();
+        ASSERT_TRUE(val.is_valid)
+            << "Tree validation failure during reverse delete at key " << i << ": " << val.error_message;
+
+        // Verify remaining lower keys can still be looked up
+        for (int rem = std::max(1, i - 5); rem < i; ++rem) {
+            RID r;
+            EXPECT_TRUE(tree.GetValue(rem, &r));
+            EXPECT_EQ(r.GetSlotNum(), static_cast<uint32_t>(rem));
+        }
+    }
+
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetDepth(), 0u);
+    EXPECT_EQ(tree.GetRootPageId(), INVALID_PAGE_ID);
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 42: Workload 3 - Random Insert & Random Delete (Validate Every Op)
+// ============================================================================
+TEST_F(BPlusTreeTest, WorkloadRandomInsertDeleteValidateEveryOp) {
+    // Minimum fanout: (3, 3) for maximum structural churn
+    BPlusTree<int, RID> tree("workload_rand", bpm_.get(), std::less<int>{}, 3, 3);
+
+    const int total_keys = 40;
+    std::vector<int> keys(total_keys);
+    std::iota(keys.begin(), keys.end(), 1);
+
+    std::mt19937 rng(133742);
+    std::shuffle(keys.begin(), keys.end(), rng);
+
+    // 1. Random Insertions
+    for (size_t step = 0; step < keys.size(); ++step) {
+        int k = keys[step];
+        ASSERT_TRUE(tree.Insert(k, RID(30, static_cast<uint32_t>(k))))
+            << "Random insert failed for key " << k;
+        EXPECT_EQ(tree.GetRecordCount(), step + 1);
+
+        std::string err;
+        ASSERT_TRUE(tree.CheckIntegrity(&err))
+            << "Integrity violation during random insert of key " << k << ": " << err;
+        auto val = tree.ValidateTree();
+        ASSERT_TRUE(val.is_valid)
+            << "Validation failure during random insert of key " << k << ": " << val.error_message;
+    }
+
+    // Shuffle for a completely different deletion sequence
+    std::shuffle(keys.begin(), keys.end(), rng);
+
+    // 2. Random Deletions
+    for (size_t step = 0; step < keys.size(); ++step) {
+        int k = keys[step];
+        ASSERT_TRUE(tree.Remove(k))
+            << "Random remove failed for key " << k;
+        EXPECT_FALSE(tree.Contains(k));
+        EXPECT_EQ(tree.GetRecordCount(), keys.size() - step - 1);
+
+        std::string err;
+        ASSERT_TRUE(tree.CheckIntegrity(&err))
+            << "Integrity violation during random delete of key " << k << ": " << err;
+        auto val = tree.ValidateTree();
+        ASSERT_TRUE(val.is_valid)
+            << "Validation failure during random delete of key " << k << ": " << val.error_message;
+    }
+
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetDepth(), 0u);
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 43: Workload 4 - Interleaved Mixed Operations (Validate Every Op)
+// ============================================================================
+TEST_F(BPlusTreeTest, WorkloadMixedOperationsValidateEveryOp) {
+    // Fanout: (4, 3)
+    BPlusTree<int, RID> tree("workload_mixed", bpm_.get(), std::less<int>{}, 4, 3);
+
+    std::set<int> oracle;
+    std::mt19937 rng(88888);
+    std::uniform_int_distribution<int> key_dist(1, 200);
+    std::uniform_int_distribution<int> op_dist(0, 99);
+
+    const int total_ops = 120;
+
+    for (int op = 0; op < total_ops; ++op) {
+        int choice = op_dist(rng);
+
+        if (choice < 45) {
+            // Op 1: Insert fresh key
+            int k = key_dist(rng);
+            if (oracle.count(k) == 0) {
+                ASSERT_TRUE(tree.Insert(k, RID(40, static_cast<uint32_t>(k))));
+                oracle.insert(k);
+            } else {
+                // Duplicate key insert must return false
+                EXPECT_FALSE(tree.Insert(k, RID(40, static_cast<uint32_t>(k))));
+            }
+        } else if (choice < 80) {
+            // Op 2: Delete existing key (if oracle non-empty)
+            if (!oracle.empty()) {
+                // Select an existing key from oracle
+                auto it = oracle.begin();
+                std::advance(it, std::uniform_int_distribution<size_t>(0, oracle.size() - 1)(rng));
+                int k = *it;
+
+                ASSERT_TRUE(tree.Remove(k)) << "Failed removing existing key " << k;
+                EXPECT_FALSE(tree.Contains(k));
+                oracle.erase(it);
+            } else {
+                // Delete missing key on empty tree
+                EXPECT_FALSE(tree.Remove(key_dist(rng)));
+            }
+        } else if (choice < 90) {
+            // Op 3: Duplicate key rejection test
+            if (!oracle.empty()) {
+                auto it = oracle.begin();
+                std::advance(it, std::uniform_int_distribution<size_t>(0, oracle.size() - 1)(rng));
+                int k = *it;
+                EXPECT_FALSE(tree.Insert(k, RID(40, 9999))); // must reject
+            }
+        } else {
+            // Op 4: Missing key removal test
+            int k = key_dist(rng);
+            while (oracle.count(k) > 0) {
+                k = key_dist(rng);
+            }
+            EXPECT_FALSE(tree.Remove(k)); // must return false
+        }
+
+        // Validate state against oracle after EVERY operation
+        EXPECT_EQ(tree.GetRecordCount(), oracle.size());
+        EXPECT_EQ(tree.IsEmpty(), oracle.empty());
+
+        std::string err;
+        ASSERT_TRUE(tree.CheckIntegrity(&err))
+            << "Integrity violation at mixed step " << op << ": " << err;
+        auto val = tree.ValidateTree();
+        ASSERT_TRUE(val.is_valid)
+            << "Validation failure at mixed step " << op << ": " << val.error_message;
+    }
+
+    // Drain all remaining keys in oracle one by one
+    while (!oracle.empty()) {
+        int k = *oracle.begin();
+        oracle.erase(oracle.begin());
+
+        ASSERT_TRUE(tree.Remove(k));
+        EXPECT_FALSE(tree.Contains(k));
+        EXPECT_EQ(tree.GetRecordCount(), oracle.size());
+
+        std::string err;
+        ASSERT_TRUE(tree.CheckIntegrity(&err));
+        auto val = tree.ValidateTree();
+        ASSERT_TRUE(val.is_valid);
+    }
+
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetDepth(), 0u);
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 44: Workload 5 - Multi-Fanout Workload Matrix (Validate Every Op)
+// ============================================================================
+TEST_F(BPlusTreeTest, WorkloadMultiFanoutMatrixStress) {
+    const std::vector<std::pair<int, int>> fanouts = {
+        {3, 3}, {3, 4}, {4, 3}, {4, 4}, {5, 4}
+    };
+
+    for (const auto &[leaf_max, int_max] : fanouts) {
+        std::string tree_name = "matrix_" + std::to_string(leaf_max) + "_" + std::to_string(int_max);
+        BPlusTree<int, RID> tree(tree_name, bpm_.get(), std::less<int>{}, leaf_max, int_max);
+
+        const int num_keys = 24;
+
+        // Sequential insert
+        for (int i = 1; i <= num_keys; ++i) {
+            ASSERT_TRUE(tree.Insert(i, RID(50, static_cast<uint32_t>(i))));
+            std::string err;
+            ASSERT_TRUE(tree.CheckIntegrity(&err))
+                << "Fanout (" << leaf_max << "," << int_max << ") insert integrity failed at " << i << ": " << err;
+            auto val = tree.ValidateTree();
+            ASSERT_TRUE(val.is_valid)
+                << "Fanout (" << leaf_max << "," << int_max << ") insert validation failed at " << i << ": " << val.error_message;
+        }
+
+        // Random delete
+        std::vector<int> del_order(num_keys);
+        std::iota(del_order.begin(), del_order.end(), 1);
+        std::mt19937 rng(42 + leaf_max * 10 + int_max);
+        std::shuffle(del_order.begin(), del_order.end(), rng);
+
+        for (int k : del_order) {
+            ASSERT_TRUE(tree.Remove(k));
+            EXPECT_FALSE(tree.Contains(k));
+            std::string err;
+            ASSERT_TRUE(tree.CheckIntegrity(&err))
+                << "Fanout (" << leaf_max << "," << int_max << ") delete integrity failed at " << k << ": " << err;
+            auto val = tree.ValidateTree();
+            ASSERT_TRUE(val.is_valid)
+                << "Fanout (" << leaf_max << "," << int_max << ") delete validation failed at " << k << ": " << val.error_message;
+        }
+
+        EXPECT_TRUE(tree.IsEmpty());
+        EXPECT_EQ(tree.GetRecordCount(), 0u);
+        EXPECT_EQ(tree.GetDepth(), 0u);
+
+        AssertAllPagesUnpinned();
+    }
+}
