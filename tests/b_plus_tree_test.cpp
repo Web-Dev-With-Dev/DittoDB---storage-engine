@@ -2368,3 +2368,126 @@ TEST_F(BPlusTreeTest, WorkloadMultiFanoutMatrixStress) {
         AssertAllPagesUnpinned();
     }
 }
+
+// ============================================================================
+// Test 45: Multi-Level Cascaded Root Collapse Edge Case
+// ============================================================================
+TEST_F(BPlusTreeTest, MultiLevelCascadedRootCollapse) {
+    // Small fanouts to force deep tree (depth >= 4) with 100 keys
+    BPlusTree<int, RID> tree("cascaded_collapse", bpm_.get(), std::less<int>{}, 3, 3);
+
+    for (int i = 1; i <= 80; ++i) {
+        ASSERT_TRUE(tree.Insert(i, RID(10, static_cast<uint32_t>(i))));
+    }
+
+    uint32_t initial_depth = tree.GetDepth();
+    EXPECT_GE(initial_depth, 3u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Delete keys in order: verifies that multiple levels of internal root collapses
+    // unfold cleanly down to 0 without hanging, violating internal size bounds, or leaking pins.
+    for (int i = 1; i <= 80; ++i) {
+        ASSERT_TRUE(tree.Remove(i));
+        EXPECT_FALSE(tree.Contains(i));
+        auto val = tree.ValidateTree();
+        ASSERT_TRUE(val.is_valid) << "Failed validation after removing " << i << ": " << val.error_message;
+    }
+
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetDepth(), 0u);
+    EXPECT_EQ(tree.GetRootPageId(), INVALID_PAGE_ID);
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 46: Deleting Smallest Key in Subtree Without Underflow
+// ============================================================================
+TEST_F(BPlusTreeTest, DeletingSmallestKeyInSubtreeWithoutUnderflow) {
+    // Leaf max 4 (min 2), internal max 4 (min 2)
+    BPlusTree<int, RID> tree("delete_smallest_no_underflow", bpm_.get(), std::less<int>{}, 4, 4);
+
+    // Populate with keys 10, 20, 30, 40, 50, 60, 70, 80
+    for (int k : {10, 20, 30, 40, 50, 60, 70, 80}) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    // Leaf containing {50, 60, 70} or similar has 50 as router separator in internal ancestor.
+    // Removing 50 removes the first key from that leaf, leaving size >= min_size (no underflow).
+    ASSERT_TRUE(tree.Remove(50));
+    EXPECT_FALSE(tree.Contains(50));
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Ensure all other keys are still retrievable
+    for (int k : {10, 20, 30, 40, 60, 70, 80}) {
+        RID r;
+        EXPECT_TRUE(tree.GetValue(k, &r));
+        EXPECT_EQ(r.GetSlotNum(), static_cast<uint32_t>(k));
+    }
+
+    // Now remove 10 (smallest key in entire tree, no underflow)
+    ASSERT_TRUE(tree.Remove(10));
+    EXPECT_FALSE(tree.Contains(10));
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    for (int k : {20, 30, 40, 60, 70, 80}) {
+        RID r;
+        EXPECT_TRUE(tree.GetValue(k, &r));
+        EXPECT_EQ(r.GetSlotNum(), static_cast<uint32_t>(k));
+    }
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 47: Exhaustive Single Key Insert-Delete Cycling
+// ============================================================================
+TEST_F(BPlusTreeTest, ExhaustiveSingleKeyInsertDeleteCycling) {
+    BPlusTree<int, RID> tree("single_key_cycling", bpm_.get(), std::less<int>{}, 3, 3);
+
+    for (int round = 1; round <= 20; ++round) {
+        int key = round * 100;
+        ASSERT_TRUE(tree.Insert(key, RID(1, static_cast<uint32_t>(key))));
+        EXPECT_FALSE(tree.IsEmpty());
+        EXPECT_EQ(tree.GetRecordCount(), 1u);
+        EXPECT_EQ(tree.GetDepth(), 1u);
+        EXPECT_NE(tree.GetRootPageId(), INVALID_PAGE_ID);
+        EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+        RID val;
+        EXPECT_TRUE(tree.GetValue(key, &val));
+        EXPECT_EQ(val.GetSlotNum(), static_cast<uint32_t>(key));
+
+        ASSERT_TRUE(tree.Remove(key));
+        EXPECT_TRUE(tree.IsEmpty());
+        EXPECT_EQ(tree.GetRecordCount(), 0u);
+        EXPECT_EQ(tree.GetDepth(), 0u);
+        EXPECT_EQ(tree.GetRootPageId(), INVALID_PAGE_ID);
+        EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+        AssertAllPagesUnpinned();
+    }
+}
+
+// ============================================================================
+// Test 48: Coalesce Fallback to Right Sibling When Left Sibling Cannot Merge
+// ============================================================================
+TEST_F(BPlusTreeTest, CoalesceFallbackToRightSibling) {
+    // leaf_max_size = 4, internal_max_size = 4
+    BPlusTree<int, RID> tree("fallback_right", bpm_.get(), std::less<int>{}, 4, 4);
+
+    // Build a multi-leaf tree
+    for (int i = 1; i <= 15; ++i) {
+        ASSERT_TRUE(tree.Insert(i, RID(1, static_cast<uint32_t>(i))));
+    }
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Delete arbitrary keys in middle leaves to exercise fallback paths
+    for (int i : {7, 8, 9, 4, 5, 6}) {
+        ASSERT_TRUE(tree.Remove(i));
+        auto val = tree.ValidateTree();
+        ASSERT_TRUE(val.is_valid) << "Failed validation at " << i << ": " << val.error_message;
+    }
+
+    AssertAllPagesUnpinned();
+}
