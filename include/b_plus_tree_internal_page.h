@@ -60,6 +60,14 @@ public:
     }
 
     /**
+     * @brief Minimum number of children required in a non-root internal page.
+     * Equal to (max_size + 1) / 2 (consistent with ValidateTree occupancy check).
+     */
+    int GetMinSize() const {
+        return (GetMaxSize() + 1) / 2;
+    }
+
+    /**
      * @brief Reinterpret cast a raw Page pointer into a typed BPlusTreeInternalPage pointer.
      * @param page Raw memory Page pointer.
      * @return BPlusTreeInternalPage* In-place typed pointer.
@@ -293,6 +301,142 @@ public:
                         BPlusTreePage::Cast(child_frame)->SetParentPageId(recipient->GetPageId());
                         bpm->UnpinPage(child_pid, true);
                     }
+                }
+            }
+        }
+    }
+
+    /**
+     * @brief Move all entries from this node into recipient during internal node merge.
+     *
+     * In an internal node merge:
+     * - recipient has size S_L.
+     * - array_[0].second (this node's leftmost child) is inserted at recipient->array_[S_L] with middle_key.
+     * - array_[1 .. size - 1] are copied to recipient->array_[S_L + 1 .. S_L + size - 1].
+     * - recipient size increases by size.
+     * - If bpm is provided, all moved children are reparented to recipient->GetPageId().
+     * - This node size is reset to 0.
+     *
+     * @tparam BPM Buffer pool manager type.
+     * @param recipient Target left sibling internal page.
+     * @param middle_key Separator key pulled down from parent.
+     * @param bpm Optional BufferPoolManager to update parent pointers of all moved child pages.
+     */
+    template <typename BPM = void>
+    void MoveAllTo(BPlusTreeInternalPage *recipient, const KeyType &middle_key, BPM *bpm = nullptr) {
+        assert(recipient != nullptr);
+        int target_start = recipient->GetSize();
+        int move_count = GetSize();
+
+        // 1. First moved entry takes middle_key from parent and array_[0].second as child
+        recipient->array_[target_start] = {middle_key, array_[0].second};
+
+        // 2. Remaining entries copied directly
+        for (int i = 1; i < move_count; ++i) {
+            recipient->array_[target_start + i] = array_[i];
+        }
+
+        recipient->IncreaseSize(move_count);
+        SetSize(0);
+
+        // 3. Reparent all moved children to recipient
+        if constexpr (!std::is_same_v<BPM, void>) {
+            if (bpm != nullptr) {
+                for (int i = 0; i < move_count; ++i) {
+                    page_id_t child_pid = recipient->ValueAt(target_start + i);
+                    auto *child_frame = bpm->FetchPage(child_pid);
+                    if (child_frame != nullptr) {
+                        BPlusTreePage::Cast(child_frame)->SetParentPageId(recipient->GetPageId());
+                        bpm->UnpinPage(child_pid, true);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * @brief Move last entry from this node to front of recipient (redistribution from left sibling).
+     *
+     * In an internal node:
+     * - recipient entries [0 .. size - 1] shift right to [1 .. size].
+     * - recipient->array_[1].first gets middle_key (pulled down from parent).
+     * - recipient->array_[0].second gets this node's last child (ValueAt(size - 1)).
+     * - recipient size increases by 1.
+     * - The borrowed child is reparented to recipient->GetPageId().
+     * - This node size decreases by 1.
+     *
+     * @tparam BPM Buffer pool manager type.
+     * @param recipient Right sibling internal page (underflowing).
+     * @param middle_key Separator key pulled down from parent.
+     * @param bpm Optional BufferPoolManager to update parent pointer of the moved child.
+     */
+    template <typename BPM = void>
+    void MoveLastToFrontOf(BPlusTreeInternalPage *recipient, const KeyType &middle_key, BPM *bpm = nullptr) {
+        assert(recipient != nullptr);
+        assert(GetSize() > 0);
+
+        int rec_size = recipient->GetSize();
+        for (int i = rec_size; i > 0; --i) {
+            recipient->array_[i] = recipient->array_[i - 1];
+        }
+
+        recipient->array_[1].first = middle_key;
+        page_id_t borrowed_child_pid = ValueAt(GetSize() - 1);
+        recipient->array_[0].second = borrowed_child_pid;
+        recipient->IncreaseSize(1);
+        IncreaseSize(-1);
+
+        if constexpr (!std::is_same_v<BPM, void>) {
+            if (bpm != nullptr) {
+                auto *child_frame = bpm->FetchPage(borrowed_child_pid);
+                if (child_frame != nullptr) {
+                    BPlusTreePage::Cast(child_frame)->SetParentPageId(recipient->GetPageId());
+                    bpm->UnpinPage(borrowed_child_pid, true);
+                }
+            }
+        }
+    }
+
+    /**
+     * @brief Move first entry from this node to end of recipient (redistribution from right sibling).
+     *
+     * In an internal node:
+     * - recipient->array_[size] gets {middle_key, this node's leftmost child ValueAt(0)}.
+     * - recipient size increases by 1.
+     * - The borrowed child is reparented to recipient->GetPageId().
+     * - This node shifts its remaining entries left:
+     *   array_[0].second becomes ValueAt(1).
+     *   array_[1 .. size - 2] get array_[2 .. size - 1].
+     * - This node size decreases by 1.
+     *
+     * @tparam BPM Buffer pool manager type.
+     * @param recipient Left sibling internal page (underflowing).
+     * @param middle_key Separator key pulled down from parent.
+     * @param bpm Optional BufferPoolManager to update parent pointer of the moved child.
+     */
+    template <typename BPM = void>
+    void MoveFirstToEndOf(BPlusTreeInternalPage *recipient, const KeyType &middle_key, BPM *bpm = nullptr) {
+        assert(recipient != nullptr);
+        assert(GetSize() > 0);
+
+        int rec_size = recipient->GetSize();
+        page_id_t borrowed_child_pid = ValueAt(0);
+        recipient->array_[rec_size] = {middle_key, borrowed_child_pid};
+        recipient->IncreaseSize(1);
+
+        // Shift remaining entries left in this node
+        array_[0].second = ValueAt(1);
+        for (int i = 1; i < GetSize() - 1; ++i) {
+            array_[i] = array_[i + 1];
+        }
+        IncreaseSize(-1);
+
+        if constexpr (!std::is_same_v<BPM, void>) {
+            if (bpm != nullptr) {
+                auto *child_frame = bpm->FetchPage(borrowed_child_pid);
+                if (child_frame != nullptr) {
+                    BPlusTreePage::Cast(child_frame)->SetParentPageId(recipient->GetPageId());
+                    bpm->UnpinPage(borrowed_child_pid, true);
                 }
             }
         }

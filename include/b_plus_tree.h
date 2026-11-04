@@ -1117,13 +1117,8 @@ public:
             bpm_->DeletePage(leaf_pid);
             *leaf_deleted = true;
 
-            // 5. Parent root adjustment or unpin
-            if (parent->IsRootPage() && parent->GetSize() == 1) {
-                AdjustRoot(parent);
-            } else {
-                bpm_->UnpinPage(parent_pid, true);
-            }
-
+            // 5. Parent underflow handling (recurse or adjust root)
+            HandleParentUnderflow(parent);
             return true;
         }
 
@@ -1151,18 +1146,242 @@ public:
             bpm_->DeletePage(right_pid);
             *leaf_deleted = false;
 
-            // 4. Parent root adjustment or unpin
-            if (parent->IsRootPage() && parent->GetSize() == 1) {
-                AdjustRoot(parent);
-            } else {
-                bpm_->UnpinPage(parent_pid, true);
-            }
-
+            // 4. Parent underflow handling (recurse or adjust root)
+            HandleParentUnderflow(parent);
             return true;
         }
 
         bpm_->UnpinPage(parent_pid, false);
         return false;
+    }
+
+    /**
+     * @brief Redistribute entries between an underflowing internal page and one of its siblings sharing the same parent.
+     *
+     * In an internal node redistribution:
+     * - Left Sibling:
+     *   - Borrows last child of left_sibling (ValueAt(size - 1)).
+     *   - Pulls down parent separator key (at parent_idx) to become KeyAt(1) of internal.
+     *   - Pushes up left_sibling's last key (KeyAt(size - 1)) to become the new parent separator.
+     *   - Reparents the borrowed child to internal.
+     * - Right Sibling:
+     *   - Borrows first child of right_sibling (ValueAt(0)).
+     *   - Pulls down parent separator key (at parent_idx + 1) to become KeyAt(size) of internal.
+     *   - Pushes up right_sibling's first key (KeyAt(1)) to become the new parent separator.
+     *   - Reparents the borrowed child to internal.
+     *
+     * @param internal Pointer to underflowing internal page.
+     * @return true if redistribution resolved underflow, false if neither sibling could spare an entry.
+     */
+    bool Redistribute(InternalPage *internal) {
+        if (internal == nullptr || internal->IsRootPage() || bpm_ == nullptr) {
+            return false;
+        }
+        if (internal->GetSize() >= internal->GetMinSize()) {
+            return false;
+        }
+
+        page_id_t parent_pid = internal->GetParentPageId();
+        if (parent_pid == INVALID_PAGE_ID) {
+            return false;
+        }
+
+        Page *parent_frame = bpm_->FetchPage(parent_pid);
+        if (parent_frame == nullptr) {
+            return false;
+        }
+
+        auto *parent = InternalPage::Cast(parent_frame);
+        int parent_idx = parent->ValueIndex(internal->GetPageId());
+        if (parent_idx == -1) {
+            bpm_->UnpinPage(parent_pid, false);
+            return false;
+        }
+
+        // 1. Try Left Internal Sibling
+        if (parent_idx > 0) {
+            page_id_t left_pid = parent->ValueAt(parent_idx - 1);
+            Page *left_frame = bpm_->FetchPage(left_pid);
+            if (left_frame != nullptr) {
+                auto *left_sibling = InternalPage::Cast(left_frame);
+                if (left_sibling->GetSize() > left_sibling->GetMinSize()) {
+                    KeyType middle_key = parent->KeyAt(parent_idx);
+                    KeyType pushed_up_key = left_sibling->KeyAt(left_sibling->GetSize() - 1);
+
+                    left_sibling->MoveLastToFrontOf(internal, middle_key, bpm_);
+                    parent->SetKeyAt(parent_idx, pushed_up_key);
+
+                    bpm_->UnpinPage(left_pid, true);
+                    bpm_->UnpinPage(parent_pid, true);
+                    return true;
+                }
+                bpm_->UnpinPage(left_pid, false);
+            }
+        }
+
+        // 2. Try Right Internal Sibling
+        if (parent_idx < parent->GetSize() - 1) {
+            page_id_t right_pid = parent->ValueAt(parent_idx + 1);
+            Page *right_frame = bpm_->FetchPage(right_pid);
+            if (right_frame != nullptr) {
+                auto *right_sibling = InternalPage::Cast(right_frame);
+                if (right_sibling->GetSize() > right_sibling->GetMinSize()) {
+                    KeyType middle_key = parent->KeyAt(parent_idx + 1);
+                    KeyType pushed_up_key = right_sibling->KeyAt(1);
+
+                    right_sibling->MoveFirstToEndOf(internal, middle_key, bpm_);
+                    parent->SetKeyAt(parent_idx + 1, pushed_up_key);
+
+                    bpm_->UnpinPage(right_pid, true);
+                    bpm_->UnpinPage(parent_pid, true);
+                    return true;
+                }
+                bpm_->UnpinPage(right_pid, false);
+            }
+        }
+
+        bpm_->UnpinPage(parent_pid, false);
+        return false;
+    }
+
+    /**
+     * @brief Coalesce (merge) an underflowing internal page with an adjacent sibling sharing the same parent.
+     *
+     * 1. Pulls down the separator key from parent between the two siblings.
+     * 2. Moves all entries and child pointers from right sibling into left sibling.
+     * 3. Reparents all moved children to the left sibling.
+     * 4. Deletes the separator key and child pointer from the parent.
+     * 5. Frees the right sibling page frame via bpm_->DeletePage.
+     * 6. Invokes HandleParentUnderflow to recursively resolve any underflow in the parent (up to root collapse).
+     *
+     * @param internal Pointer to underflowing internal page.
+     * @param[out] internal_deleted Out-parameter set to true if internal itself was freed.
+     * @return true if merge succeeded, false otherwise.
+     */
+    bool Coalesce(InternalPage *internal, bool *internal_deleted = nullptr) {
+        bool dummy = false;
+        if (internal_deleted == nullptr) {
+            internal_deleted = &dummy;
+        }
+        *internal_deleted = false;
+
+        if (internal == nullptr || internal->IsRootPage() || bpm_ == nullptr) {
+            return false;
+        }
+
+        page_id_t parent_pid = internal->GetParentPageId();
+        if (parent_pid == INVALID_PAGE_ID) {
+            return false;
+        }
+
+        Page *parent_frame = bpm_->FetchPage(parent_pid);
+        if (parent_frame == nullptr) {
+            return false;
+        }
+
+        auto *parent = InternalPage::Cast(parent_frame);
+        int parent_idx = parent->ValueIndex(internal->GetPageId());
+        if (parent_idx == -1) {
+            bpm_->UnpinPage(parent_pid, false);
+            return false;
+        }
+
+        // Case 1: Merge with Left Sibling (parent_idx > 0)
+        // Target: left_sibling (survives)
+        // Source: internal (freed)
+        if (parent_idx > 0) {
+            page_id_t left_pid = parent->ValueAt(parent_idx - 1);
+            Page *left_frame = bpm_->FetchPage(left_pid);
+            if (left_frame == nullptr) {
+                bpm_->UnpinPage(parent_pid, false);
+                return false;
+            }
+
+            auto *left_sibling = InternalPage::Cast(left_frame);
+            KeyType middle_key = parent->KeyAt(parent_idx);
+
+            // 1. Move all entries from internal to left_sibling (with middle_key pulled down)
+            internal->MoveAllTo(left_sibling, middle_key, bpm_);
+
+            // 2. Delete parent entry pointing to internal
+            parent->Remove(parent_idx);
+
+            // 3. Unpin left_sibling as dirty
+            bpm_->UnpinPage(left_pid, true);
+
+            // 4. Free internal page
+            page_id_t internal_pid = internal->GetPageId();
+            bpm_->UnpinPage(internal_pid, false);
+            bpm_->DeletePage(internal_pid);
+            *internal_deleted = true;
+
+            // 5. Parent underflow handling (recurse or adjust root)
+            HandleParentUnderflow(parent);
+            return true;
+        }
+
+        // Case 2: Merge with Right Sibling (parent_idx == 0)
+        // Target: internal (survives)
+        // Source: right_sibling (freed)
+        if (parent_idx < parent->GetSize() - 1) {
+            page_id_t right_pid = parent->ValueAt(parent_idx + 1);
+            Page *right_frame = bpm_->FetchPage(right_pid);
+            if (right_frame == nullptr) {
+                bpm_->UnpinPage(parent_pid, false);
+                return false;
+            }
+
+            auto *right_sibling = InternalPage::Cast(right_frame);
+            KeyType middle_key = parent->KeyAt(parent_idx + 1);
+
+            // 1. Move all entries from right_sibling to internal (with middle_key pulled down)
+            right_sibling->MoveAllTo(internal, middle_key, bpm_);
+
+            // 2. Delete parent entry pointing to right_sibling
+            parent->Remove(parent_idx + 1);
+
+            // 3. Free right_sibling page
+            bpm_->UnpinPage(right_pid, false);
+            bpm_->DeletePage(right_pid);
+            *internal_deleted = false;
+
+            // 4. Parent underflow handling (recurse or adjust root)
+            HandleParentUnderflow(parent);
+            return true;
+        }
+
+        bpm_->UnpinPage(parent_pid, false);
+        return false;
+    }
+
+    /**
+     * @brief Handle potential underflow in parent internal node after a child entry is removed.
+     * Recursively checks if parent underflows, redistributing or coalescing as needed up to root collapse.
+     *
+     * @param parent Pointer to parent internal page (pinned by caller).
+     */
+    void HandleParentUnderflow(InternalPage *parent) {
+        if (parent == nullptr || bpm_ == nullptr) return;
+
+        if (parent->IsRootPage()) {
+            if (parent->GetSize() <= 1) {
+                AdjustRoot(parent);
+            } else {
+                bpm_->UnpinPage(parent->GetPageId(), true);
+            }
+            return;
+        }
+
+        // Non-root parent
+        if (parent->GetSize() < parent->GetMinSize()) {
+            bool parent_deleted = false;
+            CoalesceOrRedistribute(parent, &parent_deleted);
+            if (!parent_deleted) {
+                bpm_->UnpinPage(parent->GetPageId(), true);
+            }
+        } else {
+            bpm_->UnpinPage(parent->GetPageId(), true);
+        }
     }
 
     /**
@@ -1198,7 +1417,15 @@ public:
         }
 
         auto *internal_root = static_cast<InternalPage *>(old_root);
-        if (internal_root->GetSize() == 1) {
+        if (internal_root->GetSize() <= 1) {
+            if (internal_root->GetSize() == 0) {
+                page_id_t old_root_pid = internal_root->GetPageId();
+                bpm_->UnpinPage(old_root_pid, false);
+                bpm_->DeletePage(old_root_pid);
+                SetRootPageId(INVALID_PAGE_ID);
+                return true;
+            }
+
             page_id_t new_root_pid = internal_root->ValueAt(0);
             Page *new_root_frame = bpm_->FetchPage(new_root_pid);
             if (new_root_frame != nullptr) {
@@ -1219,6 +1446,33 @@ public:
         }
 
         return false;
+    }
+
+private:
+    /**
+     * @brief Handle underflow in an internal node:
+     * 1. First attempts internal redistribution (borrow from left or right sibling).
+     * 2. If redistribution fails, merges (coalesces) with an adjacent internal sibling,
+     *    pulling down the parent separator, and recurses up the tree.
+     *
+     * @param internal Pointer to underflowing internal page.
+     * @param[out] internal_deleted Out-parameter set to true if internal itself was freed.
+     * @return true if underflow was resolved.
+     */
+    bool CoalesceOrRedistribute(InternalPage *internal, bool *internal_deleted = nullptr) {
+        bool dummy = false;
+        if (internal_deleted == nullptr) {
+            internal_deleted = &dummy;
+        }
+        *internal_deleted = false;
+
+        // 1. Try internal redistribution
+        if (Redistribute(internal)) {
+            return true;
+        }
+
+        // 2. Fall back to internal coalesce
+        return Coalesce(internal, internal_deleted);
     }
 
 private:

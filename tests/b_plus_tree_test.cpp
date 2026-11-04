@@ -1681,7 +1681,8 @@ TEST_F(BPlusTreeTest, RedistributeDirectPrimitivesAndBoundaryChecks) {
     BPlusTree<int, RID> tree("redis_direct", bpm_.get(), std::less<int>{}, 4, 3);
 
     // Cannot redistribute nullptr or root page
-    EXPECT_FALSE(tree.Redistribute(nullptr));
+    EXPECT_FALSE(tree.Redistribute(static_cast<BPlusTreeLeafPage<int, RID>*>(nullptr)));
+    EXPECT_FALSE(tree.Redistribute(static_cast<BPlusTreeInternalPage<int, page_id_t>*>(nullptr)));
 
     // Insert 2 keys into root
     ASSERT_TRUE(tree.Insert(1, RID(1, 1)));
@@ -1914,5 +1915,149 @@ TEST_F(BPlusTreeTest, ContinuousCoalescingDownToEmptyAndRegrowth) {
     EXPECT_EQ(tree.GetRecordCount(), 6u);
     EXPECT_TRUE(tree.ValidateTree().is_valid);
 
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 37: Deep Multi-Level Tree Shrink: Internal Coalesce and Root Collapse
+// ============================================================================
+TEST_F(BPlusTreeTest, InternalCoalesceAndRootCollapseDepthRegression) {
+    // leaf_max_size = 4, internal_max_size = 3
+    // With internal_max_size = 3, min_internal = (3 + 1) / 2 = 2
+    BPlusTree<int, RID> tree("deep_shrink", bpm_.get(), std::less<int>{}, 4, 3);
+
+    // Insert keys 1 .. 18 to grow tree to depth 3
+    std::vector<int> keys;
+    for (int i = 1; i <= 18; ++i) {
+        keys.push_back(i);
+        ASSERT_TRUE(tree.Insert(i, RID(1, static_cast<uint32_t>(i))));
+    }
+
+    EXPECT_GE(tree.GetDepth(), 3u);
+    EXPECT_EQ(tree.GetRecordCount(), 18u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Remove keys sequentially: causes leaf coalesces, which trigger internal
+    // underflows, internal coalesces, and root collapses (depth 3 -> 2 -> 1 -> 0)
+    for (int k : keys) {
+        EXPECT_TRUE(tree.Remove(k)) << "Failed removing key " << k;
+        EXPECT_FALSE(tree.Contains(k));
+
+        std::string err;
+        EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Integrity failed after removing " << k << ": " << err;
+        auto val = tree.ValidateTree();
+        EXPECT_TRUE(val.is_valid) << "Validation failed after removing " << k << ": " << val.error_message;
+    }
+
+    // Fully collapsed to empty tree
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetDepth(), 0u);
+    EXPECT_EQ(tree.GetRootPageId(), INVALID_PAGE_ID);
+
+    // Re-insert into the fully collapsed tree
+    for (int i = 50; i <= 60; ++i) {
+        ASSERT_TRUE(tree.Insert(i, RID(2, static_cast<uint32_t>(i))));
+    }
+    EXPECT_EQ(tree.GetRecordCount(), 11u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 38: Random Removals with Continuous Validation (Internal Redistribute & Coalesce)
+// ============================================================================
+TEST_F(BPlusTreeTest, RandomRemovalsTriggeringInternalRedistributeAndCoalesce) {
+    // leaf_max_size = 4, internal_max_size = 3
+    BPlusTree<int, RID> tree("random_removals", bpm_.get(), std::less<int>{}, 4, 3);
+
+    std::vector<int> keys(30);
+    std::iota(keys.begin(), keys.end(), 1);
+    std::mt19937 rng(424242);
+    std::shuffle(keys.begin(), keys.end(), rng);
+
+    for (int k : keys) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+    EXPECT_GE(tree.GetDepth(), 3u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Shuffle for random deletion order
+    std::shuffle(keys.begin(), keys.end(), rng);
+
+    for (size_t i = 0; i < keys.size(); ++i) {
+        int k = keys[i];
+        EXPECT_TRUE(tree.Remove(k)) << "Failed removing " << k;
+        EXPECT_FALSE(tree.Contains(k));
+
+        std::string err;
+        EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Integrity failed after step " << i << " (key " << k << "): " << err;
+        auto res = tree.ValidateTree();
+        EXPECT_TRUE(res.is_valid) << "Validation failed after step " << i << " (key " << k << "): " << res.error_message;
+    }
+
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetDepth(), 0u);
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 39: Direct Internal Page Redistribution Primitives
+// ============================================================================
+TEST_F(BPlusTreeTest, DirectInternalPageRedistributionPrimitives) {
+    // Directly test internal page MoveAllTo, MoveLastToFrontOf, MoveFirstToEndOf
+    page_id_t p1_id = INVALID_PAGE_ID;
+    page_id_t p2_id = INVALID_PAGE_ID;
+
+    Page *p1_frame = bpm_->NewPage(&p1_id);
+    Page *p2_frame = bpm_->NewPage(&p2_id);
+    ASSERT_NE(p1_frame, nullptr);
+    ASSERT_NE(p2_frame, nullptr);
+
+    auto *p1 = BPlusTreeInternalPage<int, page_id_t>::Cast(p1_frame);
+    auto *p2 = BPlusTreeInternalPage<int, page_id_t>::Cast(p2_frame);
+    p1->Init(p1_id, INVALID_PAGE_ID, 4);
+    p2->Init(p2_id, INVALID_PAGE_ID, 4);
+
+    // Setup p1 with 3 children: [100, 101, 102], keys [0, 10, 20]
+    p1->SetValueAt(0, 100);
+    p1->SetKeyAt(1, 10);
+    p1->SetValueAt(1, 101);
+    p1->SetKeyAt(2, 20);
+    p1->SetValueAt(2, 102);
+    p1->SetSize(3);
+
+    // Setup p2 with 1 child: [103]
+    p2->SetValueAt(0, 103);
+    p2->SetSize(1);
+
+    // MoveLastToFrontOf: p1 lends last child (102) to p2 with middle_key 30
+    p1->MoveLastToFrontOf(p2, 30, bpm_.get());
+    EXPECT_EQ(p1->GetSize(), 2);
+    EXPECT_EQ(p2->GetSize(), 2);
+    EXPECT_EQ(p2->ValueAt(0), 102);
+    EXPECT_EQ(p2->KeyAt(1), 30);
+    EXPECT_EQ(p2->ValueAt(1), 103);
+
+    // MoveFirstToEndOf: p2 lends first child (102) back to p1 with middle_key 25
+    p2->MoveFirstToEndOf(p1, 25, bpm_.get());
+    EXPECT_EQ(p1->GetSize(), 3);
+    EXPECT_EQ(p2->GetSize(), 1);
+    EXPECT_EQ(p1->KeyAt(2), 25);
+    EXPECT_EQ(p1->ValueAt(2), 102);
+    EXPECT_EQ(p2->ValueAt(0), 103);
+
+    // MoveAllTo: merge p2 into p1 with middle_key 40
+    p2->MoveAllTo(p1, 40, bpm_.get());
+    EXPECT_EQ(p1->GetSize(), 4);
+    EXPECT_EQ(p2->GetSize(), 0);
+    EXPECT_EQ(p1->KeyAt(3), 40);
+    EXPECT_EQ(p1->ValueAt(3), 103);
+
+    bpm_->UnpinPage(p1_id, true);
+    bpm_->UnpinPage(p2_id, true);
+    bpm_->DeletePage(p1_id);
+    bpm_->DeletePage(p2_id);
     AssertAllPagesUnpinned();
 }
