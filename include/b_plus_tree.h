@@ -871,10 +871,7 @@ public:
         // Case 1: Leaf is root page
         if (leaf->IsRootPage()) {
             if (leaf->GetSize() == 0) {
-                page_id_t root_pid = leaf->GetPageId();
-                bpm_->UnpinPage(root_pid, false);
-                bpm_->DeletePage(root_pid);
-                SetRootPageId(INVALID_PAGE_ID);
+                AdjustRoot(leaf);
                 return true;
             }
             bpm_->UnpinPage(leaf->GetPageId(), true);
@@ -884,8 +881,11 @@ public:
         // Case 2: Non-root leaf
         int min_size = leaf->GetMinSize();
         if (leaf->GetSize() < min_size) {
-            CoalesceOrRedistribute(leaf);
-            bpm_->UnpinPage(leaf->GetPageId(), true);
+            bool leaf_deleted = false;
+            CoalesceOrRedistribute(leaf, &leaf_deleted);
+            if (!leaf_deleted) {
+                bpm_->UnpinPage(leaf->GetPageId(), true);
+            }
             return true;
         }
 
@@ -1035,20 +1035,217 @@ public:
         return false;
     }
 
+    /**
+     * @brief Coalesce (merge) an underflowing leaf page with an adjacent sibling sharing the same parent.
+     *
+     * 1. Merging & Leaf Chain:
+     *    - If left sibling exists (parent_idx > 0):
+     *      - Merges leaf into left_sibling via MoveAllTo.
+     *      - MoveAllTo updates left_sibling->SetNextPageId(leaf->GetNextPageId()), bridging the leaf chain.
+     *      - Removes entry pointing to leaf in parent via parent->Remove(parent_idx).
+     *      - Unpins left_sibling as dirty.
+     *      - Unpins leaf clean and frees its page frame via bpm_->DeletePage(leaf_pid).
+     *      - Sets *leaf_deleted = true.
+     *    - Otherwise, if right sibling exists (parent_idx == 0):
+     *      - Merges right_sibling into leaf via MoveAllTo.
+     *      - MoveAllTo updates leaf->SetNextPageId(right_sibling->GetNextPageId()), bridging the leaf chain.
+     *      - Removes entry pointing to right_sibling in parent via parent->Remove(parent_idx + 1).
+     *      - Unpins right_sibling clean and frees its page frame via bpm_->DeletePage(right_pid).
+     *      - Sets *leaf_deleted = false.
+     * 2. Parent & Root Adjustment:
+     *    - If parent is root and shrinks to size == 1, invokes AdjustRoot to promote the single surviving
+     *      child to root, decrement depth by 1, and free the old root internal frame.
+     *    - Otherwise, unpins parent as dirty.
+     *
+     * @param leaf Pointer to the underflowing leaf page.
+     * @param[out] leaf_deleted Out-parameter set to true if leaf itself was the freed page.
+     * @return true if merge succeeded, false otherwise.
+     */
+    bool Coalesce(LeafPage *leaf, bool *leaf_deleted = nullptr) {
+        bool dummy = false;
+        if (leaf_deleted == nullptr) {
+            leaf_deleted = &dummy;
+        }
+        *leaf_deleted = false;
+
+        if (leaf == nullptr || leaf->IsRootPage() || bpm_ == nullptr) {
+            return false;
+        }
+
+        page_id_t parent_pid = leaf->GetParentPageId();
+        if (parent_pid == INVALID_PAGE_ID) {
+            return false;
+        }
+
+        Page *parent_frame = bpm_->FetchPage(parent_pid);
+        if (parent_frame == nullptr) {
+            return false;
+        }
+
+        auto *parent = InternalPage::Cast(parent_frame);
+        int parent_idx = parent->ValueIndex(leaf->GetPageId());
+        if (parent_idx == -1) {
+            bpm_->UnpinPage(parent_pid, false);
+            return false;
+        }
+
+        // Case 1: Merge with Left Sibling (parent_idx > 0)
+        // Target: left_sibling (survives)
+        // Source: leaf (freed)
+        if (parent_idx > 0) {
+            page_id_t left_pid = parent->ValueAt(parent_idx - 1);
+            Page *left_frame = bpm_->FetchPage(left_pid);
+            if (left_frame == nullptr) {
+                bpm_->UnpinPage(parent_pid, false);
+                return false;
+            }
+
+            auto *left_sibling = LeafPage::Cast(left_frame);
+
+            // 1. Move all entries from leaf to left_sibling (and fix leaf chain)
+            leaf->MoveAllTo(left_sibling);
+
+            // 2. Delete parent entry pointing to leaf
+            parent->Remove(parent_idx);
+
+            // 3. Unpin left_sibling as dirty
+            bpm_->UnpinPage(left_pid, true);
+
+            // 4. Free leaf page
+            page_id_t leaf_pid = leaf->GetPageId();
+            bpm_->UnpinPage(leaf_pid, false);
+            bpm_->DeletePage(leaf_pid);
+            *leaf_deleted = true;
+
+            // 5. Parent root adjustment or unpin
+            if (parent->IsRootPage() && parent->GetSize() == 1) {
+                AdjustRoot(parent);
+            } else {
+                bpm_->UnpinPage(parent_pid, true);
+            }
+
+            return true;
+        }
+
+        // Case 2: Merge with Right Sibling (parent_idx == 0)
+        // Target: leaf (survives)
+        // Source: right_sibling (freed)
+        if (parent_idx < parent->GetSize() - 1) {
+            page_id_t right_pid = parent->ValueAt(parent_idx + 1);
+            Page *right_frame = bpm_->FetchPage(right_pid);
+            if (right_frame == nullptr) {
+                bpm_->UnpinPage(parent_pid, false);
+                return false;
+            }
+
+            auto *right_sibling = LeafPage::Cast(right_frame);
+
+            // 1. Move all entries from right_sibling to leaf (and fix leaf chain)
+            right_sibling->MoveAllTo(leaf);
+
+            // 2. Delete parent entry pointing to right_sibling
+            parent->Remove(parent_idx + 1);
+
+            // 3. Free right_sibling page
+            bpm_->UnpinPage(right_pid, false);
+            bpm_->DeletePage(right_pid);
+            *leaf_deleted = false;
+
+            // 4. Parent root adjustment or unpin
+            if (parent->IsRootPage() && parent->GetSize() == 1) {
+                AdjustRoot(parent);
+            } else {
+                bpm_->UnpinPage(parent_pid, true);
+            }
+
+            return true;
+        }
+
+        bpm_->UnpinPage(parent_pid, false);
+        return false;
+    }
+
+    /**
+     * @brief Adjust root page when root shrinks (internal root shrinks to 1 child, or leaf root becomes empty).
+     *
+     * Invariants handled:
+     * 1. If root is internal and size == 1:
+     *    - The only remaining child is promoted to become the new root.
+     *    - The promoted child's parent pointer is set to INVALID_PAGE_ID.
+     *    - The old internal root frame is cleanly unpinned and freed via bpm_->DeletePage.
+     *    - Tree depth in persistent header is decreased by 1.
+     * 2. If root is leaf and size == 0:
+     *    - The empty root leaf frame is unpinned and freed via bpm_->DeletePage.
+     *    - Tree root_page_id is reset to INVALID_PAGE_ID, and depth is reset to 0.
+     *
+     * @param old_root Pointer to root page.
+     * @return true if root was adjusted, false otherwise.
+     */
+    bool AdjustRoot(BPlusTreePage *old_root) {
+        if (old_root == nullptr || !old_root->IsRootPage() || bpm_ == nullptr) {
+            return false;
+        }
+
+        if (old_root->IsLeafPage()) {
+            if (old_root->GetSize() == 0) {
+                page_id_t old_pid = old_root->GetPageId();
+                bpm_->UnpinPage(old_pid, false);
+                bpm_->DeletePage(old_pid);
+                SetRootPageId(INVALID_PAGE_ID);
+                return true;
+            }
+            return false;
+        }
+
+        auto *internal_root = static_cast<InternalPage *>(old_root);
+        if (internal_root->GetSize() == 1) {
+            page_id_t new_root_pid = internal_root->ValueAt(0);
+            Page *new_root_frame = bpm_->FetchPage(new_root_pid);
+            if (new_root_frame != nullptr) {
+                auto *new_root = BPlusTreePage::Cast(new_root_frame);
+                new_root->SetParentPageId(INVALID_PAGE_ID);
+                bpm_->UnpinPage(new_root_pid, true);
+            }
+
+            page_id_t old_root_pid = internal_root->GetPageId();
+            bpm_->UnpinPage(old_root_pid, false);
+            bpm_->DeletePage(old_root_pid);
+
+            uint32_t current_depth = GetDepth();
+            uint32_t new_depth = (current_depth > 1) ? current_depth - 1 : 1;
+            SetRootPageId(new_root_pid);
+            UpdateHeaderMetadata(new_root_pid, new_depth, 0);
+            return true;
+        }
+
+        return false;
+    }
+
 private:
     /**
-     * @brief Handle underflow in a leaf node by borrowing from or merging with a sibling.
-     * First attempts redistribution (borrow from sibling). If redistribution fails,
-     * coalesce (merge) will be invoked once implemented.
+     * @brief Handle underflow in a leaf node:
+     * 1. First attempts redistribution (borrowing from left or right sibling).
+     * 2. If redistribution fails, merges (coalesces) with an adjacent sibling,
+     *    fixes the leaf chain, deletes the parent separator entry, and frees the merged page.
      *
      * @param leaf Pointer to underflowing leaf page.
-     * @return true if underflow was resolved, false otherwise.
+     * @param[out] leaf_deleted Out-parameter set to true if leaf itself was the freed page.
+     * @return true if underflow was resolved.
      */
-    bool CoalesceOrRedistribute(LeafPage *leaf) {
+    bool CoalesceOrRedistribute(LeafPage *leaf, bool *leaf_deleted = nullptr) {
+        bool dummy = false;
+        if (leaf_deleted == nullptr) {
+            leaf_deleted = &dummy;
+        }
+        *leaf_deleted = false;
+
+        // 1. Try Redistribution
         if (Redistribute(leaf)) {
             return true;
         }
-        return false;
+
+        // 2. Fall back to Coalesce (Merge)
+        return Coalesce(leaf, leaf_deleted);
     }
 
 public:

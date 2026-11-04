@@ -1734,3 +1734,185 @@ TEST_F(BPlusTreeTest, RedistributeSequencePreservingValidation) {
 
     AssertAllPagesUnpinned();
 }
+
+// ============================================================================
+// Test 33: Leaf Coalesce with Left Sibling, Parent Entry Deletion, and Root Demotion
+// ============================================================================
+TEST_F(BPlusTreeTest, CoalesceLeftSiblingFixLeafChainAndFreePage) {
+    // leaf_max_size = 4 (min_size = 2), internal_max_size = 3
+    BPlusTree<int, RID> tree("coalesce_left", bpm_.get(), std::less<int>{}, 4, 3);
+
+    // Insert {10, 20, 30, 40} -> fills single leaf
+    // Insert 50 -> splits into Leaf 1 {10, 20} and Leaf 2 {30, 40, 50}, internal root
+    for (int k : {10, 20, 30, 40, 50}) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    EXPECT_EQ(tree.GetDepth(), 2u);
+    EXPECT_EQ(tree.GetRecordCount(), 5u);
+
+    // Remove 50 -> Leaf 2 has {30, 40} (size 2 == min_size)
+    ASSERT_TRUE(tree.Remove(50));
+    EXPECT_EQ(tree.GetRecordCount(), 4u);
+    EXPECT_EQ(tree.GetDepth(), 2u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Both Leaf 1 {10, 20} and Leaf 2 {30, 40} are at min_size (2).
+    // Now remove 40 from Leaf 2:
+    // - Leaf 2 underflows to size 1.
+    // - Sibling Leaf 1 has size 2 (cannot spare an entry).
+    // - Leaf Coalesce merges Leaf 2 into Leaf 1!
+    // - Leaf 1 gets 30, size becomes 3: {10, 20, 30}.
+    // - Leaf chain: Leaf 1 next_page_id updated to Leaf 2's next_page_id (INVALID_PAGE_ID).
+    // - Parent deletes entry pointing to Leaf 2.
+    // - Internal root shrinks to 1 child -> Leaf 1 is promoted to root!
+    // - Old internal root and Leaf 2 pages are freed in BPM.
+    // - Depth becomes 1!
+    ASSERT_TRUE(tree.Remove(40));
+    EXPECT_EQ(tree.GetRecordCount(), 3u);
+    EXPECT_EQ(tree.GetDepth(), 1u);
+    EXPECT_FALSE(tree.Contains(40));
+    EXPECT_FALSE(tree.Contains(50));
+
+    // Verify remaining keys
+    for (int k : {10, 20, 30}) {
+        RID r;
+        EXPECT_TRUE(tree.GetValue(k, &r));
+        EXPECT_EQ(r.GetSlotNum(), static_cast<uint32_t>(k));
+    }
+
+    std::string err;
+    EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Integrity failed: " << err;
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 34: Leaf Coalesce with Right Sibling (Child 0 Underflows)
+// ============================================================================
+TEST_F(BPlusTreeTest, CoalesceRightSiblingFixLeafChainAndFreePage) {
+    // leaf_max_size = 4 (min_size = 2), internal_max_size = 3
+    BPlusTree<int, RID> tree("coalesce_right", bpm_.get(), std::less<int>{}, 4, 3);
+
+    for (int k : {10, 20, 30, 40, 50}) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+    // Remove 50 so both leaves have size 2: Leaf 1 {10, 20}, Leaf 2 {30, 40}
+    ASSERT_TRUE(tree.Remove(50));
+    EXPECT_EQ(tree.GetDepth(), 2u);
+
+    // Remove 10 from Leaf 1 (child 0):
+    // - Leaf 1 underflows to size 1 {20}.
+    // - No left sibling. Right sibling Leaf 2 has size 2 (cannot spare).
+    // - Coalesce merges Leaf 2 into Leaf 1!
+    // - Leaf 1 gets {30, 40}, size becomes 3: {20, 30, 40}.
+    // - Leaf chain: Leaf 1 next_page_id updated to INVALID_PAGE_ID.
+    // - Parent removes entry for Leaf 2.
+    // - Root demotes to Leaf 1 (depth becomes 1).
+    // - Leaf 2 and old internal root freed.
+    ASSERT_TRUE(tree.Remove(10));
+    EXPECT_EQ(tree.GetRecordCount(), 3u);
+    EXPECT_EQ(tree.GetDepth(), 1u);
+    EXPECT_FALSE(tree.Contains(10));
+
+    for (int k : {20, 30, 40}) {
+        RID r;
+        EXPECT_TRUE(tree.GetValue(k, &r));
+        EXPECT_EQ(r.GetSlotNum(), static_cast<uint32_t>(k));
+    }
+
+    std::string err;
+    EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Integrity failed: " << err;
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 35: Leaf Coalesce in Tree with Three Leaves (Parent Retains Size 2)
+// ============================================================================
+TEST_F(BPlusTreeTest, CoalesceInTreeWithThreeLeavesParentRetainsInternal) {
+    // leaf_max_size = 4 (min_size = 2), internal_max_size = 4
+    BPlusTree<int, RID> tree("coalesce_three_leaves", bpm_.get(), std::less<int>{}, 4, 4);
+
+    // Insert to form 3 leaves:
+    // Leaf 1: {10, 20}
+    // Leaf 2: {30, 40}
+    // Leaf 3: {50, 60, 70}
+    for (int k : {10, 20, 30, 40, 50, 60, 70}) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+    // Remove 70 so Leaf 3 has size 2: {50, 60}
+    ASSERT_TRUE(tree.Remove(70));
+    EXPECT_EQ(tree.GetDepth(), 2u);
+    EXPECT_EQ(tree.GetRecordCount(), 6u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // All 3 leaves are at min_size (2).
+    // Now remove 40 from Leaf 2 (middle child):
+    // - Leaf 2 underflows to size 1 {30}.
+    // - Left sibling Leaf 1 has size 2 (cannot spare).
+    // - Coalesce merges Leaf 2 into Leaf 1!
+    // - Leaf 1 gets 30 -> {10, 20, 30}.
+    // - Leaf chain bridged: Leaf 1 -> Leaf 3! (Leaf 2 bypassed).
+    // - In parent, entry for Leaf 2 deleted.
+    // - Parent still has 2 children (Leaf 1 and Leaf 3) -> parent remains valid internal root!
+    // - Depth remains 2!
+    // - Leaf 2 page is freed.
+    ASSERT_TRUE(tree.Remove(40));
+    EXPECT_EQ(tree.GetRecordCount(), 5u);
+    EXPECT_EQ(tree.GetDepth(), 2u);
+    EXPECT_FALSE(tree.Contains(40));
+
+    // Verify all remaining keys in both leaves
+    for (int k : {10, 20, 30, 50, 60}) {
+        RID r;
+        EXPECT_TRUE(tree.GetValue(k, &r));
+        EXPECT_EQ(r.GetSlotNum(), static_cast<uint32_t>(k));
+    }
+
+    std::string err;
+    EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Integrity failed: " << err;
+    auto val_res = tree.ValidateTree();
+    EXPECT_TRUE(val_res.is_valid) << val_res.error_message;
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 36: Continuous Coalescing from Multi-Level Down to Empty and Growth
+// ============================================================================
+TEST_F(BPlusTreeTest, ContinuousCoalescingDownToEmptyAndRegrowth) {
+    // leaf_max_size = 4, internal_max_size = 3
+    BPlusTree<int, RID> tree("coalesce_to_empty", bpm_.get(), std::less<int>{}, 4, 3);
+
+    // Insert 5 keys to create a 2-level tree (internal root + 2 leaves)
+    std::vector<int> data = {1, 2, 3, 4, 5};
+    for (int d : data) {
+        ASSERT_TRUE(tree.Insert(d, RID(1, static_cast<uint32_t>(d))));
+    }
+    EXPECT_EQ(tree.GetDepth(), 2u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Continuously delete all keys one by one in reverse order
+    for (auto it = data.rbegin(); it != data.rend(); ++it) {
+        EXPECT_TRUE(tree.Remove(*it)) << "Failed removing " << *it;
+        EXPECT_FALSE(tree.Contains(*it));
+
+        auto result = tree.ValidateTree();
+        EXPECT_TRUE(result.is_valid) << "Failed validation after removing " << *it << ": " << result.error_message;
+    }
+
+    // Tree should now be completely empty
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetDepth(), 0u);
+    EXPECT_EQ(tree.GetRootPageId(), INVALID_PAGE_ID);
+
+    // Re-grow tree
+    for (int k = 100; k <= 105; ++k) {
+        ASSERT_TRUE(tree.Insert(k, RID(2, static_cast<uint32_t>(k))));
+    }
+    EXPECT_EQ(tree.GetRecordCount(), 6u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    AssertAllPagesUnpinned();
+}
