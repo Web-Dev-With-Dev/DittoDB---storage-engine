@@ -901,20 +901,155 @@ public:
         return Remove(key);
     }
 
+    /**
+     * @brief Borrow an entry from the left sibling into the underflowing leaf page and update the parent separator.
+     *
+     * 1. Moves the last (greatest) entry from left_sibling to the front (index 0) of leaf via MoveLastToFrontOf.
+     * 2. Updates the separator key in parent at parent_idx to match the new first key of leaf (leaf->KeyAt(0)).
+     *
+     * @param leaf Pointer to the underflowing leaf page.
+     * @param left_sibling Pointer to the left sibling leaf page with entries to spare.
+     * @param parent Pointer to the shared parent internal page.
+     * @param parent_idx Index of leaf in parent (parent_idx > 0).
+     * @return true if borrowing succeeded, false otherwise.
+     */
+    bool RedistributeBorrowFromLeft(LeafPage *leaf, LeafPage *left_sibling, InternalPage *parent, int parent_idx) {
+        if (leaf == nullptr || left_sibling == nullptr || parent == nullptr || parent_idx <= 0) {
+            return false;
+        }
+        if (left_sibling->GetSize() <= left_sibling->GetMinSize()) {
+            return false;
+        }
+
+        left_sibling->MoveLastToFrontOf(leaf);
+        parent->SetKeyAt(parent_idx, leaf->KeyAt(0));
+        return true;
+    }
+
+    /**
+     * @brief Borrow an entry from the right sibling into the underflowing leaf page and update the parent separator.
+     *
+     * 1. Moves the first (smallest) entry from right_sibling to the end of leaf via MoveFirstToEndOf.
+     * 2. Updates the separator key in parent at parent_idx + 1 to match the new first key of right_sibling.
+     * 3. If parent_idx > 0, also updates parent separator at parent_idx to leaf->KeyAt(0) in case leaf's
+     *    first key was the one deleted.
+     *
+     * @param leaf Pointer to the underflowing leaf page.
+     * @param right_sibling Pointer to the right sibling leaf page with entries to spare.
+     * @param parent Pointer to the shared parent internal page.
+     * @param parent_idx Index of leaf in parent (0 <= parent_idx < parent->GetSize() - 1).
+     * @return true if borrowing succeeded, false otherwise.
+     */
+    bool RedistributeBorrowFromRight(LeafPage *leaf, LeafPage *right_sibling, InternalPage *parent, int parent_idx) {
+        if (leaf == nullptr || right_sibling == nullptr || parent == nullptr || parent_idx < 0 ||
+            parent_idx >= parent->GetSize() - 1) {
+            return false;
+        }
+        if (right_sibling->GetSize() <= right_sibling->GetMinSize()) {
+            return false;
+        }
+
+        right_sibling->MoveFirstToEndOf(leaf);
+        parent->SetKeyAt(parent_idx + 1, right_sibling->KeyAt(0));
+        if (parent_idx > 0) {
+            parent->SetKeyAt(parent_idx, leaf->KeyAt(0));
+        }
+        return true;
+    }
+
+    /**
+     * @brief Redistribute entries between an underflowing leaf page and one of its siblings sharing the same parent.
+     *
+     * Algorithm:
+     * 1. Checks if leaf is eligible for redistribution (non-null, non-root, underflowing).
+     * 2. Fetches parent internal page and identifies child index of leaf.
+     * 3. Probes Left Sibling (parent_idx > 0):
+     *    - If left sibling has entries to spare (size > min_size), borrows last entry via MoveLastToFrontOf
+     *      and updates parent separator at parent_idx to leaf->KeyAt(0).
+     *    - Marks left sibling and parent dirty, unpins all frames, and returns true.
+     * 4. Probes Right Sibling (parent_idx < parent->GetSize() - 1):
+     *    - If right sibling has entries to spare (size > min_size), borrows first entry via MoveFirstToEndOf
+     *      and updates parent separator at parent_idx + 1 to right_sibling->KeyAt(0).
+     *    - Marks right sibling and parent dirty, unpins all frames, and returns true.
+     * 5. If neither sibling has spare entries, unpins parent clean and returns false (merge required).
+     *
+     * @param leaf Pointer to underflowing leaf page.
+     * @return true if redistribution resolved underflow, false if neither sibling could spare an entry.
+     */
+    bool Redistribute(LeafPage *leaf) {
+        if (leaf == nullptr || leaf->IsRootPage() || bpm_ == nullptr) {
+            return false;
+        }
+        if (leaf->GetSize() >= leaf->GetMinSize()) {
+            return false;
+        }
+
+        page_id_t parent_pid = leaf->GetParentPageId();
+        if (parent_pid == INVALID_PAGE_ID) {
+            return false;
+        }
+
+        Page *parent_frame = bpm_->FetchPage(parent_pid);
+        if (parent_frame == nullptr) {
+            return false;
+        }
+
+        auto *parent = InternalPage::Cast(parent_frame);
+        int parent_idx = parent->ValueIndex(leaf->GetPageId());
+        if (parent_idx == -1) {
+            bpm_->UnpinPage(parent_pid, false);
+            return false;
+        }
+
+        // 1. Try Left Sibling (preferred)
+        if (parent_idx > 0) {
+            page_id_t left_pid = parent->ValueAt(parent_idx - 1);
+            Page *left_frame = bpm_->FetchPage(left_pid);
+            if (left_frame != nullptr) {
+                auto *left_sibling = LeafPage::Cast(left_frame);
+                if (RedistributeBorrowFromLeft(leaf, left_sibling, parent, parent_idx)) {
+                    bpm_->UnpinPage(left_pid, true);
+                    bpm_->UnpinPage(parent_pid, true);
+                    return true;
+                }
+                bpm_->UnpinPage(left_pid, false);
+            }
+        }
+
+        // 2. Try Right Sibling
+        if (parent_idx < parent->GetSize() - 1) {
+            page_id_t right_pid = parent->ValueAt(parent_idx + 1);
+            Page *right_frame = bpm_->FetchPage(right_pid);
+            if (right_frame != nullptr) {
+                auto *right_sibling = LeafPage::Cast(right_frame);
+                if (RedistributeBorrowFromRight(leaf, right_sibling, parent, parent_idx)) {
+                    bpm_->UnpinPage(right_pid, true);
+                    bpm_->UnpinPage(parent_pid, true);
+                    return true;
+                }
+                bpm_->UnpinPage(right_pid, false);
+            }
+        }
+
+        bpm_->UnpinPage(parent_pid, false);
+        return false;
+    }
+
 private:
     /**
      * @brief Handle underflow in a leaf node by borrowing from or merging with a sibling.
-     * Hook for leaf underflow, to be expanded in subsequent redistribution/coalesce tasks.
+     * First attempts redistribution (borrow from sibling). If redistribution fails,
+     * coalesce (merge) will be invoked once implemented.
      *
      * @param leaf Pointer to underflowing leaf page.
      * @return true if underflow was resolved, false otherwise.
      */
     bool CoalesceOrRedistribute(LeafPage *leaf) {
-        (void)leaf;
+        if (Redistribute(leaf)) {
+            return true;
+        }
         return false;
     }
-
-public:
 
 public:
     // ==================== Tree Validation & Graphviz Diagnostics ====================

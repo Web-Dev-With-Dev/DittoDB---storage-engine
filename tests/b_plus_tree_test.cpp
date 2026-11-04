@@ -1582,3 +1582,155 @@ TEST_F(BPlusTreeTest, RemoveFromMultiLevelTreeWithoutUnderflow) {
     EXPECT_TRUE(tree.ValidateTree().is_valid);
     AssertAllPagesUnpinned();
 }
+
+// ============================================================================
+// Test 29: Leaf Redistribution Borrowing from Left Sibling and Updating Parent Separator
+// ============================================================================
+TEST_F(BPlusTreeTest, RedistributeBorrowFromLeftSibling) {
+    // leaf_max_size = 4 (min_size = 2), internal_max_size = 3
+    BPlusTree<int, RID> tree("redis_left", bpm_.get(), std::less<int>{}, 4, 3);
+
+    // Insert {10, 20, 30, 40, 50}
+    // Splits into: Leaf 1 = {10, 20}, Leaf 2 = {30, 40, 50}, separator = 30
+    for (int k : {10, 20, 30, 40, 50}) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    // Insert 25 into Leaf 1 -> Leaf 1 now has {10, 20, 25} (size 3 > min_size 2)
+    ASSERT_TRUE(tree.Insert(25, RID(1, 25)));
+    EXPECT_EQ(tree.GetRecordCount(), 6u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Remove 50 from Leaf 2 -> Leaf 2 has {30, 40} (size 2 == min_size)
+    ASSERT_TRUE(tree.Remove(50));
+    EXPECT_EQ(tree.GetRecordCount(), 5u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Remove 40 from Leaf 2 -> Leaf 2 now has {30} (size 1 < min_size 2) -> UNDERFLOW!
+    // Leaf 2 borrows 25 from its left sibling Leaf 1 ({10, 20, 25})!
+    // Result:
+    // Leaf 1: {10, 20} (size 2)
+    // Leaf 2: {25, 30} (size 2)
+    // Parent separator updated from 30 to 25!
+    ASSERT_TRUE(tree.Remove(40));
+    EXPECT_EQ(tree.GetRecordCount(), 4u);
+    EXPECT_FALSE(tree.Contains(40));
+    EXPECT_FALSE(tree.Contains(50));
+
+    // Verify all 4 remaining keys can be located
+    for (int k : {10, 20, 25, 30}) {
+        RID r;
+        EXPECT_TRUE(tree.GetValue(k, &r)) << "Key " << k << " must be retrievable after redistribution";
+        EXPECT_EQ(r.GetSlotNum(), static_cast<uint32_t>(k));
+    }
+
+    std::string err;
+    EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Integrity check failed: " << err;
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 30: Leaf Redistribution Borrowing from Right Sibling and Updating Parent Separator
+// ============================================================================
+TEST_F(BPlusTreeTest, RedistributeBorrowFromRightSibling) {
+    // leaf_max_size = 4 (min_size = 2), internal_max_size = 3
+    BPlusTree<int, RID> tree("redis_right", bpm_.get(), std::less<int>{}, 4, 3);
+
+    // Insert {10, 20, 30, 40, 50}
+    // Splits into: Leaf 1 = {10, 20} (size 2 == min_size), Leaf 2 = {30, 40, 50} (size 3 > min_size), sep = 30
+    for (int k : {10, 20, 30, 40, 50}) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    EXPECT_EQ(tree.GetRecordCount(), 5u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Remove 20 from Leaf 1 -> Leaf 1 has {10} (size 1 < min_size 2) -> UNDERFLOW!
+    // Leaf 1 is child 0 (no left sibling), so it borrows first entry (30) from right sibling Leaf 2!
+    // Result:
+    // Leaf 1: {10, 30} (size 2)
+    // Leaf 2: {40, 50} (size 2)
+    // Parent separator updated from 30 to 40!
+    ASSERT_TRUE(tree.Remove(20));
+    EXPECT_EQ(tree.GetRecordCount(), 4u);
+    EXPECT_FALSE(tree.Contains(20));
+
+    // Verify borrowed key 30 routes correctly to Leaf 1
+    RID r30;
+    EXPECT_TRUE(tree.GetValue(30, &r30));
+    EXPECT_EQ(r30.GetSlotNum(), 30u);
+
+    // Verify remaining keys 10, 40, 50
+    for (int k : {10, 40, 50}) {
+        RID r;
+        EXPECT_TRUE(tree.GetValue(k, &r)) << "Key " << k << " must be retrievable after redistribution";
+        EXPECT_EQ(r.GetSlotNum(), static_cast<uint32_t>(k));
+    }
+
+    std::string err;
+    EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Integrity check failed: " << err;
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 31: Direct Redistribution Primitives and Sibling Boundary Checks
+// ============================================================================
+TEST_F(BPlusTreeTest, RedistributeDirectPrimitivesAndBoundaryChecks) {
+    BPlusTree<int, RID> tree("redis_direct", bpm_.get(), std::less<int>{}, 4, 3);
+
+    // Cannot redistribute nullptr or root page
+    EXPECT_FALSE(tree.Redistribute(nullptr));
+
+    // Insert 2 keys into root
+    ASSERT_TRUE(tree.Insert(1, RID(1, 1)));
+    ASSERT_TRUE(tree.Insert(2, RID(1, 2)));
+
+    Page *root_frame = bpm_->FetchPage(tree.GetRootPageId());
+    ASSERT_NE(root_frame, nullptr);
+    auto *root_leaf = BPlusTreeLeafPage<int, RID>::Cast(root_frame);
+
+    // Root leaf should not be redistributed
+    EXPECT_FALSE(tree.Redistribute(root_leaf));
+    bpm_->UnpinPage(tree.GetRootPageId(), false);
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 32: Multiple Alternating Redistributions Preserving Invariants
+// ============================================================================
+TEST_F(BPlusTreeTest, RedistributeSequencePreservingValidation) {
+    // leaf_max_size = 4, internal_max_size = 4
+    BPlusTree<int, RID> tree("redis_seq", bpm_.get(), std::less<int>{}, 4, 4);
+
+    // Insert a sequence to create multiple leaves with spare capacity
+    std::vector<int> data = {10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120};
+    for (int d : data) {
+        ASSERT_TRUE(tree.Insert(d, RID(1, static_cast<uint32_t>(d))));
+    }
+
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Add extra keys to specific leaves
+    ASSERT_TRUE(tree.Insert(15, RID(1, 15)));
+    ASSERT_TRUE(tree.Insert(35, RID(1, 35)));
+    ASSERT_TRUE(tree.Insert(55, RID(1, 55)));
+    ASSERT_TRUE(tree.Insert(75, RID(1, 75)));
+
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Delete keys that trigger redistribution without needing full merge
+    for (int del_key : {10, 30, 50, 70}) {
+        EXPECT_TRUE(tree.Remove(del_key)) << "Failed to remove " << del_key;
+        EXPECT_FALSE(tree.Contains(del_key));
+
+        std::string err;
+        EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Integrity failed after removing " << del_key << ": " << err;
+        auto result = tree.ValidateTree();
+        EXPECT_TRUE(result.is_valid) << "Validation failed after removing " << del_key << ": " << result.error_message;
+    }
+
+    AssertAllPagesUnpinned();
+}
