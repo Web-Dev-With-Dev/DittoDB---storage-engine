@@ -362,6 +362,16 @@ public:
         return false;
     }
 
+    /**
+     * @brief Check whether a key exists in the B+ Tree.
+     * @param key The key to search for.
+     * @return true if key exists, false otherwise.
+     */
+    bool Contains(const KeyType &key) const {
+        ValueType val;
+        return GetValue(key, &val);
+    }
+
     // ==================== Insertion & Tree Growth ====================
 
     /**
@@ -804,6 +814,107 @@ public:
             }
         }
     }
+
+    // ==================== Deletion & Tree Shrinking ====================
+
+    /**
+     * @brief Remove a key and its associated value from the B+ Tree.
+     *
+     * Execution Flow:
+     * 1. Acquires unique (write) lock on tree rwlock.
+     * 2. Checks if tree is empty; returns false immediately if empty.
+     * 3. Traverses root-to-leaf via FindLeafPage to locate the leaf node that should contain key.
+     * 4. Searches leaf via KeyIndex:
+     *    - If key is absent (missing key): unpins the leaf page with is_dirty = false and returns false.
+     * 5. If key is found:
+     *    - Deletes record via RemoveAndDeleteRecord, shifting subsequent records left.
+     *    - Decrements persistent index record count via UpdateRecordCount(-1).
+     * 6. Underflow check:
+     *    - If leaf is root:
+     *      - If size == 0: frees root page via bpm_->DeletePage, resets root_page_id_ to INVALID_PAGE_ID,
+     *        sets depth to 0 in header, and returns true.
+     *      - If size > 0: unpins leaf as dirty and returns true.
+     *    - If leaf is non-root:
+     *      - If size >= leaf->GetMinSize() (leaf does NOT underflow):
+     *        unpins leaf as dirty and returns true.
+     *      - If size < leaf->GetMinSize() (underflow occurs):
+     *        invokes CoalesceOrRedistribute hook, unpins leaf as dirty and returns true.
+     * 7. Ensures zero pin leaks on all execution and error return paths.
+     *
+     * @param key Key to remove.
+     * @return true if key was successfully removed, false if key was missing or tree empty.
+     */
+    bool Remove(const KeyType &key) {
+        std::unique_lock<std::shared_mutex> lock(*rwlock_);
+
+        if (IsEmpty()) {
+            return false;
+        }
+
+        Page *leaf_frame = FindLeafPage(key, false);
+        if (leaf_frame == nullptr) {
+            return false;
+        }
+
+        auto *leaf = LeafPage::Cast(leaf_frame);
+        int key_idx = leaf->KeyIndex(key, comparator_);
+        if (key_idx == -1) {
+            // Missing key: tree unmodified, leaf unpinned clean
+            bpm_->UnpinPage(leaf_frame->GetPageId(), false);
+            return false;
+        }
+
+        // Key found: delete record from leaf
+        leaf->RemoveAndDeleteRecord(key, comparator_);
+        UpdateRecordCount(-1);
+
+        // Case 1: Leaf is root page
+        if (leaf->IsRootPage()) {
+            if (leaf->GetSize() == 0) {
+                page_id_t root_pid = leaf->GetPageId();
+                bpm_->UnpinPage(root_pid, false);
+                bpm_->DeletePage(root_pid);
+                SetRootPageId(INVALID_PAGE_ID);
+                return true;
+            }
+            bpm_->UnpinPage(leaf->GetPageId(), true);
+            return true;
+        }
+
+        // Case 2: Non-root leaf
+        int min_size = leaf->GetMinSize();
+        if (leaf->GetSize() < min_size) {
+            CoalesceOrRedistribute(leaf);
+            bpm_->UnpinPage(leaf->GetPageId(), true);
+            return true;
+        }
+
+        // Deletion without underflow
+        bpm_->UnpinPage(leaf->GetPageId(), true);
+        return true;
+    }
+
+    /**
+     * @brief Alias for Remove(const KeyType &key).
+     */
+    bool Delete(const KeyType &key) {
+        return Remove(key);
+    }
+
+private:
+    /**
+     * @brief Handle underflow in a leaf node by borrowing from or merging with a sibling.
+     * Hook for leaf underflow, to be expanded in subsequent redistribution/coalesce tasks.
+     *
+     * @param leaf Pointer to underflowing leaf page.
+     * @return true if underflow was resolved, false otherwise.
+     */
+    bool CoalesceOrRedistribute(LeafPage *leaf) {
+        (void)leaf;
+        return false;
+    }
+
+public:
 
 public:
     // ==================== Tree Validation & Graphviz Diagnostics ====================

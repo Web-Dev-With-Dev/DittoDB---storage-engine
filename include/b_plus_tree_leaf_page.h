@@ -63,6 +63,14 @@ public:
     }
 
     /**
+     * @brief Minimum number of entries required in a non-root leaf page.
+     * Equal to max_size / 2 (consistent with B+ Tree leaf occupancy).
+     */
+    int GetMinSize() const {
+        return GetMaxSize() / 2;
+    }
+
+    /**
      * @brief Reinterpret cast a raw Page pointer into a typed BPlusTreeLeafPage pointer.
      * @param page Raw memory Page pointer.
      * @return BPlusTreeLeafPage* In-place typed pointer.

@@ -1389,3 +1389,196 @@ TEST_F(BPlusTreeTest, FuzzIntegrityAllFanouts) {
     }
 }
 
+
+// ============================================================================
+// Test 24: Remove from Empty Tree Returns False and Leaves Zero Pin Leaks
+// ============================================================================
+TEST_F(BPlusTreeTest, RemoveFromEmptyTreeReturnsFalse) {
+    BPlusTree<int, RID> tree("remove_empty", bpm_.get(), std::less<int>{}, 4, 3);
+
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetDepth(), 0u);
+
+    // Attempting to remove from empty tree must cleanly return false
+    EXPECT_FALSE(tree.Remove(10));
+    EXPECT_FALSE(tree.Delete(20));
+    EXPECT_FALSE(tree.Remove(-1));
+
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetDepth(), 0u);
+
+    auto result = tree.ValidateTree();
+    EXPECT_TRUE(result.is_valid) << result.error_message;
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 25: Remove Missing Keys Leaves Tree Intact with Clean Unpins
+// ============================================================================
+TEST_F(BPlusTreeTest, RemoveMissingKeysLeavesTreeIntact) {
+    BPlusTree<int, RID> tree("remove_missing", bpm_.get(), std::less<int>{}, 4, 3);
+
+    std::vector<int> keys = {10, 20, 30};
+    for (int k : keys) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    EXPECT_EQ(tree.GetRecordCount(), 3u);
+
+    // Missing keys: lower than min, between existing keys, greater than max
+    std::vector<int> missing_keys = {-100, 0, 5, 15, 25, 35, 100, 999};
+    for (int mk : missing_keys) {
+        EXPECT_FALSE(tree.Remove(mk)) << "Remove should return false for missing key: " << mk;
+        EXPECT_FALSE(tree.Delete(mk)) << "Delete alias should return false for missing key: " << mk;
+        EXPECT_EQ(tree.GetRecordCount(), 3u);
+    }
+
+    // Verify all original keys are still present and unaltered
+    for (int k : keys) {
+        RID r;
+        EXPECT_TRUE(tree.GetValue(k, &r));
+        EXPECT_EQ(r.GetPageId(), 1);
+        EXPECT_EQ(r.GetSlotNum(), static_cast<uint32_t>(k));
+    }
+
+    auto result = tree.ValidateTree();
+    EXPECT_TRUE(result.is_valid) << result.error_message;
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 26: Remove from Single Leaf Root Without Underflow
+// ============================================================================
+TEST_F(BPlusTreeTest, RemoveFromSingleLeafRootWithoutUnderflow) {
+    BPlusTree<int, RID> tree("single_leaf_remove", bpm_.get(), std::less<int>{}, 5, 4);
+
+    // Insert 4 keys into single leaf root (max_size = 5)
+    std::vector<int> keys = {10, 20, 30, 40};
+    for (int k : keys) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+    EXPECT_EQ(tree.GetRecordCount(), 4u);
+    EXPECT_EQ(tree.GetDepth(), 1u);
+
+    // 1. Remove middle key 20
+    EXPECT_TRUE(tree.Remove(20));
+    EXPECT_EQ(tree.GetRecordCount(), 3u);
+    EXPECT_FALSE(tree.Contains(20));
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Duplicate remove of 20 should fail
+    EXPECT_FALSE(tree.Remove(20));
+    EXPECT_EQ(tree.GetRecordCount(), 3u);
+
+    // 2. Remove last key 40
+    EXPECT_TRUE(tree.Remove(40));
+    EXPECT_EQ(tree.GetRecordCount(), 2u);
+    EXPECT_FALSE(tree.Contains(40));
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // 3. Remove first key 10
+    EXPECT_TRUE(tree.Remove(10));
+    EXPECT_EQ(tree.GetRecordCount(), 1u);
+    EXPECT_FALSE(tree.Contains(10));
+
+    // Verify sole remaining key 30
+    RID r;
+    EXPECT_TRUE(tree.GetValue(30, &r));
+    EXPECT_EQ(r.GetSlotNum(), 30u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 27: Remove from Single Leaf Root Down to Empty and Reinsert
+// ============================================================================
+TEST_F(BPlusTreeTest, RemoveSingleLeafRootDownToEmptyAndReinsert) {
+    BPlusTree<int, RID> tree("root_down_to_empty", bpm_.get(), std::less<int>{}, 4, 3);
+
+    ASSERT_TRUE(tree.Insert(42, RID(1, 42)));
+    EXPECT_FALSE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 1u);
+    EXPECT_EQ(tree.GetDepth(), 1u);
+
+    // Remove the only key
+    EXPECT_TRUE(tree.Remove(42));
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetDepth(), 0u);
+    EXPECT_EQ(tree.GetRootPageId(), INVALID_PAGE_ID);
+
+    auto result = tree.ValidateTree();
+    EXPECT_TRUE(result.is_valid) << result.error_message;
+
+    // Verify lookup fails
+    EXPECT_FALSE(tree.Contains(42));
+
+    // Re-insert into the emptied tree
+    ASSERT_TRUE(tree.Insert(100, RID(2, 100)));
+    ASSERT_TRUE(tree.Insert(200, RID(2, 200)));
+
+    EXPECT_FALSE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 2u);
+    EXPECT_EQ(tree.GetDepth(), 1u);
+
+    RID r;
+    EXPECT_TRUE(tree.GetValue(100, &r));
+    EXPECT_EQ(r.GetSlotNum(), 100u);
+    EXPECT_TRUE(tree.GetValue(200, &r));
+    EXPECT_EQ(r.GetSlotNum(), 200u);
+
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 28: Remove from Multi-Level Tree Without Underflow
+// ============================================================================
+TEST_F(BPlusTreeTest, RemoveFromMultiLevelTreeWithoutUnderflow) {
+    // leaf_max_size = 4, internal_max_size = 3
+    // Non-root leaf min_size = 4 / 2 = 2
+    BPlusTree<int, RID> tree("multilevel_no_underflow", bpm_.get(), std::less<int>{}, 4, 3);
+
+    // Insert keys carefully to produce a multi-level tree
+    std::vector<int> initial_keys = {10, 20, 30, 40, 50, 60, 70, 80};
+    for (int k : initial_keys) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    EXPECT_GT(tree.GetDepth(), 1u);
+    EXPECT_EQ(tree.GetRecordCount(), 8u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Now insert key 25. This inserts into the leaf containing 20 or 30,
+    // increasing that leaf's size from 2 to 3.
+    ASSERT_TRUE(tree.Insert(25, RID(1, 25)));
+    EXPECT_EQ(tree.GetRecordCount(), 9u);
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+    // Removing 25 will decrease that leaf's size from 3 back to 2.
+    // Since 2 >= min_size (2), NO underflow occurs!
+    EXPECT_TRUE(tree.Remove(25));
+    EXPECT_EQ(tree.GetRecordCount(), 8u);
+    EXPECT_FALSE(tree.Contains(25));
+
+    // Also remove missing keys in multi-level tree
+    EXPECT_FALSE(tree.Remove(25)); // already deleted
+    EXPECT_FALSE(tree.Remove(999));
+    EXPECT_FALSE(tree.Remove(-5));
+    EXPECT_EQ(tree.GetRecordCount(), 8u);
+
+    // Verify all 8 original keys are fully intact and correct
+    for (int k : initial_keys) {
+        RID r;
+        EXPECT_TRUE(tree.GetValue(k, &r)) << "Key " << k << " missing after removal!";
+        EXPECT_EQ(r.GetSlotNum(), static_cast<uint32_t>(k));
+    }
+
+    std::string err;
+    EXPECT_TRUE(tree.CheckIntegrity(&err)) << "Integrity failed: " << err;
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+    AssertAllPagesUnpinned();
+}
