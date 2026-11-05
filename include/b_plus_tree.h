@@ -465,6 +465,52 @@ public:
     INDEXITERATOR_TYPE End() { return INDEXITERATOR_TYPE(); }
     INDEXITERATOR_TYPE end() { return INDEXITERATOR_TYPE(); }
 
+    // ==================== Range Scan ====================
+
+    /**
+     * @brief Range scan: retrieve all (key, value) pairs whose keys fall within [low_key, high_key].
+     * @param low_key Lower bound key (inclusive).
+     * @param high_key Upper bound key (inclusive).
+     * @param[out] result Output vector where matching pairs are stored.
+     * @return size_t Total number of matching elements found.
+     */
+    size_t RangeScan(const KeyType &low_key, const KeyType &high_key,
+                     std::vector<std::pair<KeyType, ValueType>> *result) const {
+        if (result != nullptr) {
+            result->clear();
+        }
+        size_t count = 0;
+        for (auto it = Begin(low_key); it != End() && Compare(comparator_, it->first, high_key) <= 0; ++it) {
+            if (result != nullptr) {
+                result->push_back(*it);
+            }
+            count++;
+        }
+        return count;
+    }
+
+    /**
+     * @brief Range scan: retrieve all values (RIDs) whose keys fall within [low_key, high_key].
+     * @param low_key Lower bound key (inclusive).
+     * @param high_key Upper bound key (inclusive).
+     * @param[out] result Output vector where matching values are stored.
+     * @return size_t Total number of matching elements found.
+     */
+    size_t RangeScan(const KeyType &low_key, const KeyType &high_key,
+                     std::vector<ValueType> *result) const {
+        if (result != nullptr) {
+            result->clear();
+        }
+        size_t count = 0;
+        for (auto it = Begin(low_key); it != End() && Compare(comparator_, it->first, high_key) <= 0; ++it) {
+            if (result != nullptr) {
+                result->push_back(it->second);
+            }
+            count++;
+        }
+        return count;
+    }
+
     // ==================== Insertion & Tree Growth ====================
 
     /**

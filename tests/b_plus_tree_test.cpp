@@ -2734,3 +2734,264 @@ TEST_F(BPlusTreeTest, IndexIteratorEarlyTerminationZeroPinLeaks) {
     }
     AssertAllPagesUnpinned();
 }
+
+// ============================================================================
+// Test 56: Range Scan - Full Scan Across Multi-Level Leaves
+// ============================================================================
+TEST_F(BPlusTreeTest, RangeScanFullScanAcrossMultiLevelLeaves) {
+    // Fanout 4/3 forces deep tree with many leaf splits
+    BPlusTree<int, RID> tree("range_full_scan", bpm_.get(), std::less<int>{}, 4, 3);
+
+    const int total_keys = 150;
+    std::vector<int> insert_keys(total_keys);
+    std::iota(insert_keys.begin(), insert_keys.end(), 1);
+
+    // Shuffle inserts to ensure leaf chain ordering is verified independent of insertion order
+    std::mt19937 g(12345);
+    std::shuffle(insert_keys.begin(), insert_keys.end(), g);
+
+    for (int k : insert_keys) {
+        ASSERT_TRUE(tree.Insert(k, RID(10, static_cast<uint32_t>(k))));
+    }
+
+    EXPECT_GT(tree.GetDepth(), 2u);
+    EXPECT_EQ(tree.GetRecordCount(), static_cast<uint64_t>(total_keys));
+
+    // 1. Manual iterator traversal from Begin() to End()
+    std::vector<int> manual_scanned;
+    for (auto it = tree.Begin(); it != tree.End(); ++it) {
+        manual_scanned.push_back(it->first);
+        EXPECT_EQ(it->second.GetSlotNum(), static_cast<uint32_t>(it->first));
+    }
+
+    std::vector<int> expected_sorted(total_keys);
+    std::iota(expected_sorted.begin(), expected_sorted.end(), 1);
+    EXPECT_EQ(manual_scanned, expected_sorted);
+
+    // 2. Range-based for loop syntax
+    std::vector<int> range_for_scanned;
+    for (const auto &[k, val] : tree) {
+        range_for_scanned.push_back(k);
+        EXPECT_EQ(val.GetSlotNum(), static_cast<uint32_t>(k));
+    }
+    EXPECT_EQ(range_for_scanned, expected_sorted);
+
+    // 3. Tree RangeScan helper
+    std::vector<std::pair<int, RID>> helper_scanned;
+    size_t count = tree.RangeScan(1, total_keys, &helper_scanned);
+    EXPECT_EQ(count, static_cast<size_t>(total_keys));
+    EXPECT_EQ(helper_scanned.size(), static_cast<size_t>(total_keys));
+    for (int i = 0; i < total_keys; ++i) {
+        EXPECT_EQ(helper_scanned[i].first, expected_sorted[i]);
+    }
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 57: Range Scan - From a Key (Exact Hits, Lower Bounds, Subranges)
+// ============================================================================
+TEST_F(BPlusTreeTest, RangeScanFromKeyExactAndSubranges) {
+    BPlusTree<int, RID> tree("range_from_key", bpm_.get(), std::less<int>{}, 4, 3);
+
+    // Insert keys: 10, 20, 30, ..., 200 (20 keys spaced by 10)
+    for (int k = 10; k <= 200; k += 10) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    // 1. Exact Hit: start scan from 70 to end
+    {
+        std::vector<int> scanned;
+        for (auto it = tree.Begin(70); it != tree.End(); ++it) {
+            scanned.push_back(it->first);
+        }
+        std::vector<int> expected;
+        for (int k = 70; k <= 200; k += 10) expected.push_back(k);
+        EXPECT_EQ(scanned, expected);
+    }
+
+    // 2. Lower Bound Hit on missing key: start scan from 45 (should land on 50)
+    {
+        std::vector<int> scanned;
+        for (auto it = tree.Begin(45); it != tree.End(); ++it) {
+            scanned.push_back(it->first);
+        }
+        std::vector<int> expected;
+        for (int k = 50; k <= 200; k += 10) expected.push_back(k);
+        EXPECT_EQ(scanned, expected);
+    }
+
+    // 3. Bounded Subrange [35, 125]: should match 40, 50, ..., 120
+    {
+        std::vector<int> scanned;
+        for (auto it = tree.Begin(35); it != tree.End() && it->first <= 125; ++it) {
+            scanned.push_back(it->first);
+        }
+        std::vector<int> expected = {40, 50, 60, 70, 80, 90, 100, 110, 120};
+        EXPECT_EQ(scanned, expected);
+    }
+
+    // 4. Start before minimum key: Begin(-50) should start at first key (10)
+    {
+        auto it = tree.Begin(-50);
+        ASSERT_FALSE(it.IsEnd());
+        EXPECT_EQ(it->first, 10);
+    }
+
+    // 5. Start at minimum key: Begin(10) should start at 10
+    {
+        auto it = tree.Begin(10);
+        ASSERT_FALSE(it.IsEnd());
+        EXPECT_EQ(it->first, 10);
+    }
+
+    // 6. Single-key range using RangeScan helper [90, 90]
+    {
+        std::vector<std::pair<int, RID>> result;
+        size_t count = tree.RangeScan(90, 90, &result);
+        EXPECT_EQ(count, 1u);
+        ASSERT_EQ(result.size(), 1u);
+        EXPECT_EQ(result[0].first, 90);
+    }
+
+    // 7. Missing single-key range [85, 85]
+    {
+        std::vector<std::pair<int, RID>> result;
+        size_t count = tree.RangeScan(85, 85, &result);
+        EXPECT_EQ(count, 0u);
+        EXPECT_TRUE(result.empty());
+    }
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 58: Range Scan - Past the End
+// ============================================================================
+TEST_F(BPlusTreeTest, RangeScanPastTheEnd) {
+    BPlusTree<int, RID> tree("range_past_end", bpm_.get(), std::less<int>{}, 4, 3);
+
+    for (int k : {10, 20, 30, 40, 50}) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    // 1. Begin(51): one past the maximum key (50)
+    {
+        auto it = tree.Begin(51);
+        EXPECT_TRUE(it == tree.End());
+        EXPECT_FALSE(it != tree.End());
+        EXPECT_TRUE(it.IsEnd());
+
+        int count = 0;
+        for (; it != tree.End(); ++it) {
+            count++;
+        }
+        EXPECT_EQ(count, 0);
+    }
+
+    // 2. Begin with extreme key
+    {
+        auto it = tree.Begin(std::numeric_limits<int>::max());
+        EXPECT_TRUE(it == tree.End());
+    }
+
+    // 3. RangeScan helper past the end [51, 100]
+    {
+        std::vector<std::pair<int, RID>> result;
+        size_t count = tree.RangeScan(51, 100, &result);
+        EXPECT_EQ(count, 0u);
+        EXPECT_TRUE(result.empty());
+    }
+
+    // 4. Inverted range [100, 50] (low_key > high_key)
+    {
+        std::vector<std::pair<int, RID>> result;
+        size_t count = tree.RangeScan(100, 50, &result);
+        EXPECT_EQ(count, 0u);
+        EXPECT_TRUE(result.empty());
+    }
+
+    // 5. Scan starting at exact maximum key (50): iterates once and reaches End()
+    {
+        auto it = tree.Begin(50);
+        ASSERT_FALSE(it.IsEnd());
+        EXPECT_EQ(it->first, 50);
+        ++it;
+        EXPECT_TRUE(it == tree.End());
+    }
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 59: Range Scan - Empty Tree (Fresh and Emptied Lifecycle)
+// ============================================================================
+TEST_F(BPlusTreeTest, RangeScanOnEmptyTree) {
+    // Part 1: Fresh Empty Tree
+    {
+        BPlusTree<int, RID> empty_tree("fresh_empty", bpm_.get(), std::less<int>{}, 4, 3);
+
+        EXPECT_TRUE(empty_tree.IsEmpty());
+        EXPECT_TRUE(empty_tree.Begin() == empty_tree.End());
+        EXPECT_TRUE(empty_tree.Begin(0) == empty_tree.End());
+        EXPECT_TRUE(empty_tree.Begin(-100) == empty_tree.End());
+        EXPECT_TRUE(empty_tree.Begin(100) == empty_tree.End());
+
+        int count = 0;
+        for (auto it = empty_tree.Begin(); it != empty_tree.End(); ++it) {
+            count++;
+        }
+        EXPECT_EQ(count, 0);
+
+        for (auto it = empty_tree.Begin(50); it != empty_tree.End(); ++it) {
+            count++;
+        }
+        EXPECT_EQ(count, 0);
+
+        std::vector<std::pair<int, RID>> result;
+        EXPECT_EQ(empty_tree.RangeScan(1, 100, &result), 0u);
+        EXPECT_TRUE(result.empty());
+
+        AssertAllPagesUnpinned();
+    }
+
+    // Part 2: Emptied Tree Lifecycle (Inserted -> Deleted Down to Empty)
+    {
+        BPlusTree<int, RID> dynamic_tree("emptied_lifecycle", bpm_.get(), std::less<int>{}, 3, 3);
+
+        std::vector<int> keys = {5, 10, 15, 20, 25};
+        for (int k : keys) {
+            ASSERT_TRUE(dynamic_tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+        }
+        EXPECT_FALSE(dynamic_tree.IsEmpty());
+        EXPECT_EQ(dynamic_tree.GetRecordCount(), 5u);
+
+        // Delete all keys to return tree to empty state
+        for (int k : keys) {
+            ASSERT_TRUE(dynamic_tree.Remove(k));
+        }
+
+        EXPECT_TRUE(dynamic_tree.IsEmpty());
+        EXPECT_EQ(dynamic_tree.GetRecordCount(), 0u);
+        EXPECT_EQ(dynamic_tree.GetDepth(), 0u);
+        EXPECT_EQ(dynamic_tree.GetRootPageId(), INVALID_PAGE_ID);
+
+        // Range scan operations on the emptied tree
+        EXPECT_TRUE(dynamic_tree.Begin() == dynamic_tree.End());
+        EXPECT_TRUE(dynamic_tree.Begin(10) == dynamic_tree.End());
+        EXPECT_TRUE(dynamic_tree.Begin(100) == dynamic_tree.End());
+
+        int count = 0;
+        for (const auto &item : dynamic_tree) {
+            (void)item;
+            count++;
+        }
+        EXPECT_EQ(count, 0);
+
+        std::vector<std::pair<int, RID>> result;
+        EXPECT_EQ(dynamic_tree.RangeScan(0, 100, &result), 0u);
+        EXPECT_TRUE(result.empty());
+
+        AssertAllPagesUnpinned();
+    }
+}
