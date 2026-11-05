@@ -488,6 +488,9 @@ public:
         if (result != nullptr) {
             result->clear();
         }
+        if (Compare(comparator_, low_key, high_key) > 0) {
+            return 0;
+        }
         size_t count = 0;
         for (auto it = Begin(low_key); it != End() && Compare(comparator_, it->first, high_key) <= 0; ++it) {
             if (result != nullptr) {
@@ -509,6 +512,9 @@ public:
                      std::vector<ValueType> *result) const {
         if (result != nullptr) {
             result->clear();
+        }
+        if (Compare(comparator_, low_key, high_key) > 0) {
+            return 0;
         }
         size_t count = 0;
         for (auto it = Begin(low_key); it != End() && Compare(comparator_, it->first, high_key) <= 0; ++it) {

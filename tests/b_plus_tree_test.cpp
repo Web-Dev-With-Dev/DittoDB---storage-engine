@@ -3333,3 +3333,210 @@ TEST_F(BPlusTreeTest, PersistenceBuildFlushCloseReopenVerifyDataAndRootId) {
         fs::remove(persist_db);
     }
 }
+
+// ============================================================================
+// Test 62: Single Entry Lifecycle Edge Cases (Insert, Scan, Delete, Root Reset)
+// ============================================================================
+TEST_F(BPlusTreeTest, SingleEntryLifecycleEdgeCases) {
+    BPlusTree<int, RID> tree("single_entry_tree", bpm_.get(), std::less<int>{}, 4, 3);
+
+    // Initial state
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetRootPageId(), INVALID_PAGE_ID);
+    EXPECT_TRUE(tree.Begin() == tree.End());
+
+    // Insert exactly 1 key
+    ASSERT_TRUE(tree.Insert(42, RID(4, 42)));
+    EXPECT_FALSE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 1u);
+    EXPECT_NE(tree.GetRootPageId(), INVALID_PAGE_ID);
+
+    // Lookup
+    RID rid;
+    EXPECT_TRUE(tree.GetValue(42, &rid));
+    EXPECT_EQ(rid, RID(4, 42));
+
+    // RangeScan tests on single entry
+    std::vector<std::pair<int, RID>> scan_res;
+    EXPECT_EQ(tree.RangeScan(42, 42, &scan_res), 1u);
+    ASSERT_EQ(scan_res.size(), 1u);
+    EXPECT_EQ(scan_res[0].first, 42);
+
+    EXPECT_EQ(tree.RangeScan(0, 41, &scan_res), 0u);
+    EXPECT_TRUE(scan_res.empty());
+
+    EXPECT_EQ(tree.RangeScan(43, 100, &scan_res), 0u);
+    EXPECT_TRUE(scan_res.empty());
+
+    // IndexIterator on single entry
+    {
+        auto it = tree.Begin();
+        ASSERT_FALSE(it == tree.End());
+        EXPECT_EQ(it->first, 42);
+        EXPECT_EQ(it->second, RID(4, 42));
+        ++it;
+        EXPECT_TRUE(it == tree.End());
+    }
+
+    // Delete single entry
+    ASSERT_TRUE(tree.Remove(42));
+    EXPECT_TRUE(tree.IsEmpty());
+    EXPECT_EQ(tree.GetRecordCount(), 0u);
+    EXPECT_EQ(tree.GetRootPageId(), INVALID_PAGE_ID);
+    EXPECT_FALSE(tree.GetValue(42, &rid));
+    EXPECT_TRUE(tree.Begin() == tree.End());
+
+    // Subsequent removal of same key fails cleanly
+    EXPECT_FALSE(tree.Remove(42));
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 63: RangeScan Boundary & Inverted Range Edge Cases
+// ============================================================================
+TEST_F(BPlusTreeTest, RangeScanBoundaryAndInvertedRangeEdgeCases) {
+    BPlusTree<int, RID> tree("rangescan_edge", bpm_.get(), std::less<int>{}, 4, 3);
+
+    for (int k : {10, 20, 30, 40, 50, 60, 70, 80}) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    std::vector<std::pair<int, RID>> scan_pairs;
+    std::vector<RID> scan_rids;
+
+    // 1. Inverted range (low > high): immediately returns 0 without traversing
+    EXPECT_EQ(tree.RangeScan(80, 10, &scan_pairs), 0u);
+    EXPECT_TRUE(scan_pairs.empty());
+    EXPECT_EQ(tree.RangeScan(50, 40, &scan_rids), 0u);
+    EXPECT_TRUE(scan_rids.empty());
+
+    // 2. Range entirely below all keys
+    EXPECT_EQ(tree.RangeScan(-100, -1, &scan_pairs), 0u);
+    EXPECT_TRUE(scan_pairs.empty());
+    EXPECT_EQ(tree.RangeScan(0, 9, &scan_pairs), 0u);
+    EXPECT_TRUE(scan_pairs.empty());
+
+    // 3. Range entirely above all keys
+    EXPECT_EQ(tree.RangeScan(81, 1000, &scan_pairs), 0u);
+    EXPECT_TRUE(scan_pairs.empty());
+
+    // 4. Single-key range where key exists
+    EXPECT_EQ(tree.RangeScan(30, 30, &scan_pairs), 1u);
+    ASSERT_EQ(scan_pairs.size(), 1u);
+    EXPECT_EQ(scan_pairs[0].first, 30);
+
+    // 5. Single-key range where key does not exist
+    EXPECT_EQ(tree.RangeScan(35, 35, &scan_pairs), 0u);
+    EXPECT_TRUE(scan_pairs.empty());
+
+    // 6. Range bounds do not exist, but intermediate keys do (e.g. [15, 75])
+    EXPECT_EQ(tree.RangeScan(15, 75, &scan_pairs), 6u); // {20, 30, 40, 50, 60, 70}
+    ASSERT_EQ(scan_pairs.size(), 6u);
+    EXPECT_EQ(scan_pairs.front().first, 20);
+    EXPECT_EQ(scan_pairs.back().first, 70);
+
+    // 7. Null output pointer (count only query)
+    EXPECT_EQ(tree.RangeScan(10, 80, static_cast<std::vector<std::pair<int, RID>> *>(nullptr)), 8u);
+    EXPECT_EQ(tree.RangeScan(10, 80, static_cast<std::vector<RID> *>(nullptr)), 8u);
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 64: IndexIterator Boundary Operations, Self-Assignment & Sentinel Parity
+// ============================================================================
+TEST_F(BPlusTreeTest, IndexIteratorBoundaryAndSentinelParity) {
+    BPlusTree<int, RID> tree("iter_edge", bpm_.get(), std::less<int>{}, 4, 3);
+    for (int k : {10, 20, 30}) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    // 1. Default-constructed iterator checks
+    IndexIterator<int, RID> default_it;
+    EXPECT_TRUE(default_it.IsEnd());
+    EXPECT_FALSE(static_cast<bool>(default_it));
+    EXPECT_EQ(default_it.GetPageId(), INVALID_PAGE_ID);
+    EXPECT_EQ(default_it.GetPage(), nullptr);
+    EXPECT_EQ(default_it.GetIndex(), 0);
+
+    // 2. Parity of default-constructed and tree.End()
+    EXPECT_TRUE(default_it == tree.End());
+    EXPECT_FALSE(default_it != tree.End());
+
+    // 3. Advancing an iterator that has reached End() safely no-ops
+    auto end_it = tree.End();
+    ++end_it;
+    EXPECT_TRUE(end_it.IsEnd());
+    end_it++;
+    EXPECT_TRUE(end_it.IsEnd());
+
+    // 4. Self-assignment safety on active iterator
+    {
+        auto active_it = tree.Begin();
+        ASSERT_FALSE(active_it.IsEnd());
+        EXPECT_EQ(active_it->first, 10);
+
+        // Self copy assignment
+        auto &copy_ref = active_it;
+        active_it = copy_ref;
+        EXPECT_FALSE(active_it.IsEnd());
+        EXPECT_EQ(active_it->first, 10);
+
+        // Self move assignment
+        auto &move_ref = active_it;
+        active_it = std::move(move_ref);
+        EXPECT_FALSE(active_it.IsEnd());
+        EXPECT_EQ(active_it->first, 10);
+    }
+
+    // 5. Begin(key) boundary keys
+    {
+        // Search key smaller than smallest key points to first element
+        auto it_small = tree.Begin(-100);
+        ASSERT_FALSE(it_small.IsEnd());
+        EXPECT_EQ(it_small->first, 10);
+
+        // Search key larger than largest key returns End()
+        auto it_large = tree.Begin(500);
+        EXPECT_TRUE(it_large == tree.End());
+    }
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 65: Double Removal & Idempotent Deletions
+// ============================================================================
+TEST_F(BPlusTreeTest, DoubleRemovalAndIdempotentDeletions) {
+    BPlusTree<int, RID> tree("double_remove", bpm_.get(), std::less<int>{}, 4, 3);
+    for (int k : {10, 20, 30, 40}) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    // Remove 20 successfully
+    ASSERT_TRUE(tree.Remove(20));
+    EXPECT_FALSE(tree.Contains(20));
+    EXPECT_EQ(tree.GetRecordCount(), 3u);
+
+    // Second removal of 20 fails cleanly and idempotently
+    EXPECT_FALSE(tree.Remove(20));
+    EXPECT_EQ(tree.GetRecordCount(), 3u);
+
+    // Remove non-existent boundary keys
+    EXPECT_FALSE(tree.Remove(-999));
+    EXPECT_FALSE(tree.Remove(999));
+    EXPECT_FALSE(tree.Remove(25));
+    EXPECT_EQ(tree.GetRecordCount(), 3u);
+
+    // Verify all remaining keys are 100% intact
+    for (int k : {10, 30, 40}) {
+        RID r;
+        EXPECT_TRUE(tree.GetValue(k, &r));
+        EXPECT_EQ(r.GetSlotNum(), static_cast<uint32_t>(k));
+    }
+
+    EXPECT_TRUE(tree.ValidateTree().is_valid);
+    AssertAllPagesUnpinned();
+}

@@ -162,9 +162,12 @@ public:
 
     /**
      * @brief Prefix increment operator: advances to next entry across the leaf chain.
+     * Safely no-ops if iterator has already reached End().
      */
     IndexIterator &operator++() {
-        assert(!IsEnd() && page_ != nullptr);
+        if (IsEnd() || page_ == nullptr) {
+            return *this;
+        }
         index_++;
         auto *leaf = LeafPage::Cast(page_);
         if (index_ >= leaf->GetSize()) {
