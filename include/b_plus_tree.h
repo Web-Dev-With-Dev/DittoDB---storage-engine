@@ -113,6 +113,15 @@ public:
         
         leaf_max_size_ = (leaf_max_size > 0) ? leaf_max_size : static_cast<int>(LeafPage::LEAF_PAGE_SIZE);
         internal_max_size_ = (internal_max_size > 0) ? internal_max_size : static_cast<int>(InternalPage::INTERNAL_PAGE_SIZE);
+
+        if (header_page_id_ != INVALID_PAGE_ID && bpm_ != nullptr) {
+            Page *header_frame = bpm_->FetchPage(header_page_id_);
+            if (header_frame != nullptr) {
+                const auto *header = BPlusTreeHeaderPage::Cast(header_frame);
+                root_page_id_ = header->GetRootPageId();
+                bpm_->UnpinPage(header_page_id_, false);
+            }
+        }
     }
 
     /**

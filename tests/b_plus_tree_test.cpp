@@ -3104,3 +3104,232 @@ TEST_F(BPlusTreeTest, BenchmarkBulkInsertPointLookupRangeScanWithBufferPoolIO) {
         fs::remove(bench_db);
     }
 }
+
+// ============================================================================
+// Test 61: Persistence Test - Build, Flush, Close, Reopen, Verify Data & Root ID
+// ============================================================================
+TEST_F(BPlusTreeTest, PersistenceBuildFlushCloseReopenVerifyDataAndRootId) {
+    const std::string persist_db = "persist_verify_root_and_data.db";
+    if (fs::exists(persist_db)) {
+        fs::remove(persist_db);
+    }
+
+    page_id_t header_pid = INVALID_PAGE_ID;
+    page_id_t expected_root_pid = INVALID_PAGE_ID;
+    const std::vector<int> initial_keys = {
+        10, 20, 30, 40, 50, 60, 70, 80, 90, 100,
+        110, 120, 130, 140, 150, 160, 170, 180, 190, 200,
+        210, 220, 230, 240, 250, 260, 270, 280, 290, 300,
+        310, 320, 330, 340, 350, 360, 370, 380, 390, 400
+    };
+
+    // ------------------------------------------------------------------------
+    // Phase 1: Build multi-level tree, capture root ID, flush, and close
+    // ------------------------------------------------------------------------
+    {
+        auto disk = std::make_unique<DiskManager>(persist_db);
+        auto bpm = std::make_unique<BufferPoolManager>(50, disk.get());
+
+        // Small fanout (leaf_max = 4, internal_max = 3) to force multi-level tree with internal splits
+        BPlusTree<int, RID> tree("persist_tree", bpm.get(), std::less<int>{}, 4, 3);
+        header_pid = tree.GetHeaderPageId();
+        ASSERT_NE(header_pid, INVALID_PAGE_ID);
+
+        // Initially empty tree has INVALID_PAGE_ID as root
+        EXPECT_EQ(tree.GetRootPageId(), INVALID_PAGE_ID);
+
+        for (int k : initial_keys) {
+            RID rid(static_cast<page_id_t>(k / 10), static_cast<uint32_t>(k));
+            ASSERT_TRUE(tree.Insert(k, rid));
+        }
+
+        EXPECT_EQ(tree.GetRecordCount(), initial_keys.size());
+        EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+        // Capture persisted root page ID
+        expected_root_pid = tree.GetRootPageId();
+        EXPECT_NE(expected_root_pid, INVALID_PAGE_ID);
+        EXPECT_NE(expected_root_pid, header_pid);
+
+        // Flush all dirty pages to physical storage
+        bpm->FlushAllPages();
+
+        // Verify no pinned pages before teardown
+        for (size_t f = 0; f < bpm->GetPoolSize(); ++f) {
+            Page *page = bpm->GetPage(static_cast<frame_id_t>(f));
+            if (page != nullptr) {
+                EXPECT_EQ(page->GetPinCount(), 0);
+            }
+        }
+    } // DiskManager and BufferPoolManager fully closed and destroyed
+
+    // ------------------------------------------------------------------------
+    // Phase 2: Reopen from disk, verify root ID, metadata, point lookups & scan
+    // ------------------------------------------------------------------------
+    {
+        auto disk = std::make_unique<DiskManager>(persist_db);
+        auto bpm = std::make_unique<BufferPoolManager>(50, disk.get());
+
+        // Attach to existing tree using header_pid
+        BPlusTree<int, RID> tree("persist_tree", header_pid, bpm.get(), std::less<int>{}, 4, 3);
+
+        // 1. Verify root ID matches exactly what was built before closing
+        EXPECT_EQ(tree.GetRootPageId(), expected_root_pid);
+        EXPECT_EQ(tree.GetHeaderPageId(), header_pid);
+        EXPECT_FALSE(tree.IsEmpty());
+        EXPECT_EQ(tree.GetRecordCount(), initial_keys.size());
+
+        // 2. Verify tree structural invariants post-reopen
+        auto val = tree.ValidateTree();
+        EXPECT_TRUE(val.is_valid) << "Reopened tree validation failed: " << val.error_message;
+
+        // 3. Verify point lookups for all persisted keys
+        for (int k : initial_keys) {
+            RID found_rid;
+            ASSERT_TRUE(tree.GetValue(k, &found_rid)) << "Key " << k << " missing after reopen!";
+            EXPECT_EQ(found_rid.GetPageId(), static_cast<page_id_t>(k / 10));
+            EXPECT_EQ(found_rid.GetSlotNum(), static_cast<uint32_t>(k));
+        }
+
+        // Verify non-existent keys return false
+        RID missing_rid;
+        EXPECT_FALSE(tree.GetValue(5, &missing_rid));
+        EXPECT_FALSE(tree.GetValue(999, &missing_rid));
+
+        // 4. Verify full leaf chain traversal via IndexIterator
+        std::vector<int> scanned_keys;
+        for (auto it = tree.Begin(); it != tree.End(); ++it) {
+            scanned_keys.push_back(it->first);
+            EXPECT_EQ(it->second.GetSlotNum(), static_cast<uint32_t>(it->first));
+        }
+        EXPECT_EQ(scanned_keys, initial_keys);
+
+        // 5. Verify range scans on reopened tree
+        std::vector<std::pair<int, RID>> range_res;
+        tree.RangeScan(100, 200, &range_res);
+        EXPECT_EQ(range_res.size(), 11u);
+        EXPECT_EQ(range_res.front().first, 100);
+        EXPECT_EQ(range_res.back().first, 200);
+
+        // 6. Mutate the reopened tree: insert additional keys and delete some keys
+        ASSERT_TRUE(tree.Insert(410, RID(41, 410)));
+        ASSERT_TRUE(tree.Insert(420, RID(42, 420)));
+        ASSERT_TRUE(tree.Insert(430, RID(43, 430)));
+        ASSERT_TRUE(tree.Remove(10));
+        ASSERT_TRUE(tree.Remove(20));
+
+        EXPECT_EQ(tree.GetRecordCount(), initial_keys.size() + 3 - 2);
+        EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+        // Capture updated root ID (may remain same or change if split/collapse occurred)
+        expected_root_pid = tree.GetRootPageId();
+        EXPECT_NE(expected_root_pid, INVALID_PAGE_ID);
+
+        // Flush modified pages to disk
+        bpm->FlushAllPages();
+
+        for (size_t f = 0; f < bpm->GetPoolSize(); ++f) {
+            Page *page = bpm->GetPage(static_cast<frame_id_t>(f));
+            if (page != nullptr) {
+                EXPECT_EQ(page->GetPinCount(), 0);
+            }
+        }
+    } // Closed second time
+
+    // ------------------------------------------------------------------------
+    // Phase 3: Second reopen from disk, verify updated root ID and mutated data
+    // ------------------------------------------------------------------------
+    {
+        auto disk = std::make_unique<DiskManager>(persist_db);
+        auto bpm = std::make_unique<BufferPoolManager>(50, disk.get());
+
+        BPlusTree<int, RID> tree("persist_tree", header_pid, bpm.get(), std::less<int>{}, 4, 3);
+
+        // Verify root ID matches updated root
+        EXPECT_EQ(tree.GetRootPageId(), expected_root_pid);
+        EXPECT_EQ(tree.GetRecordCount(), initial_keys.size() + 1);
+
+        // Deleted keys must not exist
+        RID r;
+        EXPECT_FALSE(tree.GetValue(10, &r));
+        EXPECT_FALSE(tree.GetValue(20, &r));
+
+        // Newly added keys must exist
+        EXPECT_TRUE(tree.GetValue(410, &r));
+        EXPECT_TRUE(tree.GetValue(420, &r));
+        EXPECT_TRUE(tree.GetValue(430, &r));
+
+        EXPECT_TRUE(tree.ValidateTree().is_valid);
+
+        for (size_t f = 0; f < bpm->GetPoolSize(); ++f) {
+            Page *page = bpm->GetPage(static_cast<frame_id_t>(f));
+            if (page != nullptr) {
+                EXPECT_EQ(page->GetPinCount(), 0);
+            }
+        }
+    } // Closed third time
+
+    // ------------------------------------------------------------------------
+    // Phase 4: Empty Tree Persistence (Build empty, flush, close, reopen, verify)
+    // ------------------------------------------------------------------------
+    {
+        std::string empty_persist_db = "persist_empty_tree.db";
+        if (fs::exists(empty_persist_db)) {
+            fs::remove(empty_persist_db);
+        }
+
+        page_id_t empty_header_pid = INVALID_PAGE_ID;
+
+        // Build empty tree
+        {
+            auto disk = std::make_unique<DiskManager>(empty_persist_db);
+            auto bpm = std::make_unique<BufferPoolManager>(10, disk.get());
+
+            BPlusTree<int, RID> empty_tree("empty_tree", bpm.get(), std::less<int>{}, 4, 3);
+            empty_header_pid = empty_tree.GetHeaderPageId();
+            ASSERT_NE(empty_header_pid, INVALID_PAGE_ID);
+            EXPECT_EQ(empty_tree.GetRootPageId(), INVALID_PAGE_ID);
+            EXPECT_TRUE(empty_tree.IsEmpty());
+
+            bpm->FlushAllPages();
+        }
+
+        // Reopen empty tree
+        {
+            auto disk = std::make_unique<DiskManager>(empty_persist_db);
+            auto bpm = std::make_unique<BufferPoolManager>(10, disk.get());
+
+            BPlusTree<int, RID> empty_tree("empty_tree", empty_header_pid, bpm.get(), std::less<int>{}, 4, 3);
+            EXPECT_EQ(empty_tree.GetRootPageId(), INVALID_PAGE_ID);
+            EXPECT_TRUE(empty_tree.IsEmpty());
+            EXPECT_EQ(empty_tree.GetRecordCount(), 0u);
+            EXPECT_TRUE(empty_tree.Begin() == empty_tree.End());
+
+            // Insert first key into reopened empty tree
+            ASSERT_TRUE(empty_tree.Insert(99, RID(9, 99)));
+            EXPECT_NE(empty_tree.GetRootPageId(), INVALID_PAGE_ID);
+            EXPECT_FALSE(empty_tree.IsEmpty());
+            EXPECT_EQ(empty_tree.GetRecordCount(), 1u);
+
+            page_id_t new_root_pid = empty_tree.GetRootPageId();
+            bpm->FlushAllPages();
+
+            // Reopen once more to verify new root persisted
+            BPlusTree<int, RID> reopened_single("empty_tree", empty_header_pid, bpm.get(), std::less<int>{}, 4, 3);
+            EXPECT_EQ(reopened_single.GetRootPageId(), new_root_pid);
+            EXPECT_EQ(reopened_single.GetRecordCount(), 1u);
+            RID r;
+            EXPECT_TRUE(reopened_single.GetValue(99, &r));
+            EXPECT_EQ(r.GetSlotNum(), 99u);
+        }
+
+        if (fs::exists(empty_persist_db)) {
+            fs::remove(empty_persist_db);
+        }
+    }
+
+    // Cleanup main test db
+    if (fs::exists(persist_db)) {
+        fs::remove(persist_db);
+    }
+}
