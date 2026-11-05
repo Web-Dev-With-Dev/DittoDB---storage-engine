@@ -54,6 +54,8 @@ bool BufferPoolManager::FindAvailableFrame(frame_id_t *frame_id, std::unique_loc
         return false;
     }
 
+    evict_count_.fetch_add(1, std::memory_order_relaxed);
+
     frame_id_t victim_fid = static_cast<frame_id_t>(victim);
     Page &victim_page = pages_[victim_fid];
 
@@ -125,6 +127,8 @@ Page *BufferPoolManager::FetchPage(page_id_t page_id) {
             page.Pin();
             replacer_->RecordAccess(frame_id);
             replacer_->SetEvictable(frame_id, false);
+            hit_count_.fetch_add(1, std::memory_order_relaxed);
+            fetch_count_.fetch_add(1, std::memory_order_relaxed);
             return &page;
         }
 
@@ -223,6 +227,8 @@ Page *BufferPoolManager::FetchPage(page_id_t page_id) {
         return nullptr;
     }
 
+    miss_count_.fetch_add(1, std::memory_order_relaxed);
+    fetch_count_.fetch_add(1, std::memory_order_relaxed);
     return &page;
 }
 
@@ -255,6 +261,7 @@ bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
         replacer_->SetEvictable(frame_id, true);
     }
 
+    unpin_count_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -293,6 +300,8 @@ Page *BufferPoolManager::NewPage(page_id_t *page_id) {
     page_table_[new_page_id] = frame_id;
     replacer_->RecordAccess(frame_id);
     replacer_->SetEvictable(frame_id, false);
+
+    new_page_count_.fetch_add(1, std::memory_order_relaxed);
 
     return &page;
 }
@@ -479,4 +488,31 @@ const Page *BufferPoolManager::GetPage(frame_id_t frame_id) const {
         return &pages_[frame_id];
     }
     return nullptr;
+}
+
+BufferPoolStats BufferPoolManager::GetStats() const {
+    BufferPoolStats stats;
+    stats.fetch_count = fetch_count_.load(std::memory_order_relaxed);
+    stats.hit_count = hit_count_.load(std::memory_order_relaxed);
+    stats.miss_count = miss_count_.load(std::memory_order_relaxed);
+    stats.new_page_count = new_page_count_.load(std::memory_order_relaxed);
+    stats.evict_count = evict_count_.load(std::memory_order_relaxed);
+    stats.unpin_count = unpin_count_.load(std::memory_order_relaxed);
+    if (disk_manager_ != nullptr) {
+        stats.disk_read_count = disk_manager_->GetNumReads();
+        stats.disk_write_count = disk_manager_->GetNumWrites();
+    }
+    return stats;
+}
+
+void BufferPoolManager::ResetStats() {
+    fetch_count_.store(0, std::memory_order_relaxed);
+    hit_count_.store(0, std::memory_order_relaxed);
+    miss_count_.store(0, std::memory_order_relaxed);
+    new_page_count_.store(0, std::memory_order_relaxed);
+    evict_count_.store(0, std::memory_order_relaxed);
+    unpin_count_.store(0, std::memory_order_relaxed);
+    if (disk_manager_ != nullptr) {
+        disk_manager_->ResetIOCounters();
+    }
 }

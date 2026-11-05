@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <list>
@@ -12,6 +13,28 @@
 #include "disk_manager.h"
 #include "lru_k_replacer.h"
 #include "page.h"
+
+/**
+ * @struct BufferPoolStats
+ * @brief Diagnostic statistics and physical I/O counters for BufferPoolManager operations.
+ */
+struct BufferPoolStats {
+    size_t fetch_count{0};      ///< Total FetchPage invocations
+    size_t hit_count{0};        ///< Cache hits (page already present in memory)
+    size_t miss_count{0};       ///< Cache misses (page read from disk storage)
+    size_t disk_read_count{0};  ///< Physical disk page reads
+    size_t disk_write_count{0}; ///< Physical disk page writes (eviction write-backs + flushes)
+    size_t new_page_count{0};   ///< Total NewPage allocations
+    size_t evict_count{0};      ///< Evictions performed by LRU-K replacer
+    size_t unpin_count{0};      ///< Total UnpinPage invocations
+
+    /**
+     * @brief Compute the cache hit ratio as a percentage [0.0, 100.0].
+     */
+    double HitRatio() const {
+        return fetch_count == 0 ? 0.0 : (static_cast<double>(hit_count) / static_cast<double>(fetch_count)) * 100.0;
+    }
+};
 
 /**
  * @class BufferPoolManager
@@ -146,6 +169,16 @@ public:
     Page *GetPage(frame_id_t frame_id);
     const Page *GetPage(frame_id_t frame_id) const;
 
+    /**
+     * @brief Snapshot current buffer pool statistics and physical I/O counts.
+     */
+    BufferPoolStats GetStats() const;
+
+    /**
+     * @brief Reset buffer pool statistics and physical disk I/O counters.
+     */
+    void ResetStats();
+
 private:
     /**
      * @brief Find an available frame from the free list or via LRU-K eviction.
@@ -189,5 +222,13 @@ private:
     // Per-frame flush I/O tracking to synchronize concurrent write-backs
     std::vector<bool> frame_io_in_progress_;
     std::condition_variable io_cv_;
+
+    // Diagnostic physical I/O and cache event counters
+    mutable std::atomic<size_t> fetch_count_{0};
+    mutable std::atomic<size_t> hit_count_{0};
+    mutable std::atomic<size_t> miss_count_{0};
+    mutable std::atomic<size_t> new_page_count_{0};
+    mutable std::atomic<size_t> evict_count_{0};
+    mutable std::atomic<size_t> unpin_count_{0};
 };
 

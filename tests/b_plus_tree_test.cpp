@@ -2995,3 +2995,112 @@ TEST_F(BPlusTreeTest, RangeScanOnEmptyTree) {
         AssertAllPagesUnpinned();
     }
 }
+
+// ============================================================================
+// Test 60: Benchmark & Buffer Pool I/O Profiling (Bulk Insert, Lookup, Range Scan)
+// ============================================================================
+TEST_F(BPlusTreeTest, BenchmarkBulkInsertPointLookupRangeScanWithBufferPoolIO) {
+    const size_t num_keys = 5000;
+    std::string bench_db = "test_b_plus_tree_bench_io.db";
+    if (fs::exists(bench_db)) {
+        fs::remove(bench_db);
+    }
+
+    auto disk = std::make_unique<DiskManager>(bench_db);
+    auto bpm = std::make_unique<BufferPoolManager>(1000, disk.get());
+
+    {
+        BPlusTree<int, RID> tree("bench_tree", bpm.get(), std::less<int>{}, 32, 32);
+
+        // --- 1. Bulk Insert ---
+        bpm->ResetStats();
+        auto start_insert = std::chrono::high_resolution_clock::now();
+        for (size_t i = 1; i <= num_keys; ++i) {
+            int key = static_cast<int>(i);
+            ASSERT_TRUE(tree.Insert(key, RID(static_cast<page_id_t>(key / 100 + 1), static_cast<uint32_t>(key))));
+        }
+        auto end_insert = std::chrono::high_resolution_clock::now();
+        double insert_ms = std::chrono::duration<double, std::milli>(end_insert - start_insert).count();
+
+        BufferPoolStats insert_stats = bpm->GetStats();
+        EXPECT_EQ(tree.GetRecordCount(), num_keys);
+        EXPECT_GT(insert_stats.fetch_count, 0u);
+        EXPECT_GT(insert_stats.hit_count, 0u);
+        EXPECT_GT(insert_stats.new_page_count, 0u);
+        EXPECT_GT(insert_ms, 0.0);
+
+        // --- 2. Point Lookups (Hits) ---
+        bpm->ResetStats();
+        auto start_lookup = std::chrono::high_resolution_clock::now();
+        size_t lookup_hits = 0;
+        RID rid;
+        for (size_t i = 1; i <= num_keys; ++i) {
+            if (tree.GetValue(static_cast<int>(i), &rid)) {
+                lookup_hits++;
+            }
+        }
+        auto end_lookup = std::chrono::high_resolution_clock::now();
+        double lookup_ms = std::chrono::duration<double, std::milli>(end_lookup - start_lookup).count();
+
+        BufferPoolStats lookup_stats = bpm->GetStats();
+        EXPECT_EQ(lookup_hits, num_keys);
+        EXPECT_EQ(lookup_stats.hit_count, lookup_stats.fetch_count); // 100% cache hit ratio in memory
+        EXPECT_DOUBLE_EQ(lookup_stats.HitRatio(), 100.0);
+        EXPECT_EQ(lookup_stats.miss_count, 0u);
+        EXPECT_GT(lookup_ms, 0.0);
+
+        // --- 3. Point Lookups (Misses / Non-existent keys) ---
+        bpm->ResetStats();
+        size_t lookup_misses = 0;
+        for (size_t i = 1; i <= 1000; ++i) {
+            int non_existent_key = static_cast<int>(num_keys + i);
+            if (!tree.GetValue(non_existent_key, &rid)) {
+                lookup_misses++;
+            }
+        }
+        BufferPoolStats miss_stats = bpm->GetStats();
+        EXPECT_EQ(lookup_misses, 1000u);
+        EXPECT_GT(miss_stats.fetch_count, 0u);
+        EXPECT_DOUBLE_EQ(miss_stats.HitRatio(), 100.0);
+
+        // --- 4. Range Scans (Subranges & Full Scan) ---
+        bpm->ResetStats();
+        auto start_scan = std::chrono::high_resolution_clock::now();
+        size_t total_scanned = 0;
+        std::vector<std::pair<int, RID>> scan_results;
+        for (int start = 1; start <= 4000; start += 500) {
+            scan_results.clear();
+            total_scanned += tree.RangeScan(start, start + 99, &scan_results);
+            EXPECT_EQ(scan_results.size(), 100u);
+        }
+        auto end_scan = std::chrono::high_resolution_clock::now();
+        double scan_ms = std::chrono::duration<double, std::milli>(end_scan - start_scan).count();
+
+        BufferPoolStats scan_stats = bpm->GetStats();
+        EXPECT_EQ(total_scanned, 800u);
+        EXPECT_GT(scan_stats.fetch_count, 0u);
+        EXPECT_GT(scan_stats.hit_count, 0u);
+        EXPECT_GT(scan_ms, 0.0);
+
+        // Full leaf chain scan verification
+        size_t full_scan_items = 0;
+        for (auto it = tree.Begin(); it != tree.End(); ++it) {
+            full_scan_items++;
+        }
+        EXPECT_EQ(full_scan_items, num_keys);
+    }
+
+    // Verify all buffer frames cleanly unpinned
+    for (size_t f = 0; f < bpm->GetPoolSize(); ++f) {
+        Page *page = bpm->GetPage(static_cast<frame_id_t>(f));
+        if (page != nullptr) {
+            EXPECT_EQ(page->GetPinCount(), 0);
+        }
+    }
+
+    bpm.reset();
+    disk.reset();
+    if (fs::exists(bench_db)) {
+        fs::remove(bench_db);
+    }
+}

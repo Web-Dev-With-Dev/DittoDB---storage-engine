@@ -157,6 +157,8 @@ void DiskManager::WritePage(page_id_t page_id, const char *data)
     {
         throw std::runtime_error("Failed to flush file.");
     }
+
+    num_writes_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void DiskManager::ReadPage(page_id_t page_id, char *buffer)
@@ -185,6 +187,8 @@ void DiskManager::ReadPage(page_id_t page_id, char *buffer)
 
         db_file_.clear();
     }
+
+    num_reads_.fetch_add(1, std::memory_order_relaxed);
 }
 
 DiskManager::~DiskManager()

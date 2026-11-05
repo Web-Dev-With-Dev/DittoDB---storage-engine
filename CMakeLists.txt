@@ -85,6 +85,15 @@ add_executable(database
     ${COMMON_SOURCES}
 )
 
+# ==================== Benchmarks ====================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/b_plus_tree_benchmark.cpp)
+    add_executable(b_plus_tree_benchmark
+        benchmarks/b_plus_tree_benchmark.cpp
+        ${COMMON_SOURCES}
+    )
+    target_include_directories(b_plus_tree_benchmark PRIVATE include)
+endif()
+
 # ==================== Testing Setup ====================
 enable_testing()
 

@@ -121,6 +121,9 @@ public:
      */
     const KeyType &KeyAt(int index) const {
         assert(index >= 0 && index < GetSize());
+        if (index < 0) {
+            index = 0;
+        }
         return array_[index].first;
     }
 
@@ -131,6 +134,9 @@ public:
      */
     void SetKeyAt(int index, const KeyType &key) {
         assert(index >= 0 && index < GetMaxSize());
+        if (index < 0) {
+            index = 0;
+        }
         array_[index].first = key;
     }
 
@@ -141,6 +147,9 @@ public:
      */
     const ValueType &ValueAt(int index) const {
         assert(index >= 0 && index < GetSize());
+        if (index < 0) {
+            index = 0;
+        }
         return array_[index].second;
     }
 
@@ -151,6 +160,9 @@ public:
      */
     void SetValueAt(int index, const ValueType &value) {
         assert(index >= 0 && index < GetMaxSize());
+        if (index < 0) {
+            index = 0;
+        }
         array_[index].second = value;
     }
 
@@ -161,6 +173,9 @@ public:
      */
     const MappingType &ItemAt(int index) const {
         assert(index >= 0 && index < GetSize());
+        if (index < 0) {
+            index = 0;
+        }
         return array_[index];
     }
 

@@ -3,6 +3,7 @@
 /.idea/
 
 # Test-generated database files
+*.db
 Data/*.db
 
 *.exe

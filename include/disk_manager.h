@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <fstream>
 #include <memory>
@@ -25,6 +26,8 @@ private:
     page_id_t next_page_id_;
     /// Shared mutex keyed by file path — instances on the same file serialize I/O
     std::shared_ptr<std::mutex> file_mutex_;
+    std::atomic<size_t> num_reads_{0};
+    std::atomic<size_t> num_writes_{0};
 
 public:
     /**
@@ -68,6 +71,24 @@ public:
      * @throws std::runtime_error If seeking to the target offset fails.
      */
     void ReadPage(page_id_t page_id, char *buffer);
+
+    /**
+     * @brief Get total number of physical disk page reads executed.
+     */
+    size_t GetNumReads() const { return num_reads_.load(std::memory_order_relaxed); }
+
+    /**
+     * @brief Get total number of physical disk page writes executed.
+     */
+    size_t GetNumWrites() const { return num_writes_.load(std::memory_order_relaxed); }
+
+    /**
+     * @brief Reset physical disk read and write I/O counters to zero.
+     */
+    void ResetIOCounters() {
+        num_reads_.store(0, std::memory_order_relaxed);
+        num_writes_.store(0, std::memory_order_relaxed);
+    }
 
     /**
      * @brief Close the underlying database file stream safely.
