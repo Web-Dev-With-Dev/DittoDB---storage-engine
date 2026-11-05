@@ -188,6 +188,29 @@ public:
         return -1;
     }
 
+    /**
+     * @brief Find index of first key that is greater than or equal to search key (lower bound).
+     * @param key Search key.
+     * @param comparator Optional comparator.
+     * @return int Index in [0, GetSize()]. Returns GetSize() if all keys are strictly less than key.
+     */
+    int LowerBound(const KeyType &key, const KeyComparator &comparator = KeyComparator{}) const {
+        int low = 0;
+        int high = GetSize() - 1;
+        int result = GetSize();
+        while (low <= high) {
+            int mid = low + (high - low) / 2;
+            int cmp = Compare(comparator, array_[mid].first, key);
+            if (cmp >= 0) {
+                result = mid;
+                high = mid - 1;
+            } else {
+                low = mid + 1;
+            }
+        }
+        return result;
+    }
+
     // ==================== Binary-Search Lookup ====================
 
     /**

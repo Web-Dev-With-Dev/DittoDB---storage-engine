@@ -68,6 +68,7 @@ set(COMMON_HEADERS
     include/b_plus_tree_header_page.h
     include/b_plus_tree_internal_page.h
     include/b_plus_tree_leaf_page.h
+    include/index_iterator.h
     include/generic_key.h
     include/b_plus_tree.h
 )

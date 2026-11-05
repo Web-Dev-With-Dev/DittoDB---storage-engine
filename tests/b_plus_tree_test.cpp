@@ -2491,3 +2491,246 @@ TEST_F(BPlusTreeTest, CoalesceFallbackToRightSibling) {
 
     AssertAllPagesUnpinned();
 }
+
+// ============================================================================
+// Test 49: IndexIterator on Empty Tree
+// ============================================================================
+TEST_F(BPlusTreeTest, IndexIteratorOnEmptyTree) {
+    BPlusTree<int, RID> tree("iter_empty", bpm_.get(), std::less<int>{}, 4, 3);
+
+    auto it = tree.Begin();
+    auto end = tree.End();
+
+    EXPECT_TRUE(it == end);
+    EXPECT_FALSE(it != end);
+    EXPECT_TRUE(it.IsEnd());
+    EXPECT_FALSE(static_cast<bool>(it));
+
+    // Begin(key) on empty tree also returns End()
+    auto it_key = tree.Begin(42);
+    EXPECT_TRUE(it_key == end);
+
+    // Range-for loop should execute 0 times
+    int count = 0;
+    for (const auto &pair : tree) {
+        (void)pair;
+        count++;
+    }
+    EXPECT_EQ(count, 0);
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 50: IndexIterator on Single Leaf Page
+// ============================================================================
+TEST_F(BPlusTreeTest, IndexIteratorSingleLeafTraversal) {
+    BPlusTree<int, RID> tree("iter_single_leaf", bpm_.get(), std::less<int>{}, 5, 3);
+
+    std::vector<int> keys = {10, 20, 30, 40};
+    for (int k : keys) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    std::vector<int> scanned_keys;
+    std::vector<uint32_t> scanned_slots;
+
+    for (auto it = tree.Begin(); it != tree.End(); ++it) {
+        EXPECT_FALSE(it.IsEnd());
+        EXPECT_TRUE(static_cast<bool>(it));
+        scanned_keys.push_back(it->first);
+        scanned_slots.push_back(it->second.GetSlotNum());
+        EXPECT_EQ(it.Key(), it->first);
+        EXPECT_EQ(it.Value().GetSlotNum(), it->second.GetSlotNum());
+        EXPECT_EQ((*it).first, it->first);
+    }
+
+    EXPECT_EQ(scanned_keys, keys);
+    EXPECT_EQ(scanned_slots, (std::vector<uint32_t>{10, 20, 30, 40}));
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 51: IndexIterator Across Multi-Level Leaf Chain
+// ============================================================================
+TEST_F(BPlusTreeTest, IndexIteratorMultiLevelChainSequentialScan) {
+    // Small fanout to force deep tree with many splits and leaf chain links
+    BPlusTree<int, RID> tree("iter_multilevel", bpm_.get(), std::less<int>{}, 3, 3);
+
+    const int total_keys = 60;
+    for (int i = 1; i <= total_keys; ++i) {
+        ASSERT_TRUE(tree.Insert(i, RID(10, static_cast<uint32_t>(i))));
+    }
+
+    EXPECT_GT(tree.GetDepth(), 2u);
+
+    // Sequential scan using standard C++ range-for syntax
+    std::vector<int> scanned;
+    for (const auto &item : tree) {
+        scanned.push_back(item.first);
+        EXPECT_EQ(item.second.GetSlotNum(), static_cast<uint32_t>(item.first));
+    }
+
+    std::vector<int> expected(total_keys);
+    std::iota(expected.begin(), expected.end(), 1);
+    EXPECT_EQ(scanned, expected);
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 52: IndexIterator Begin(key) Exact Match and Lower Bound
+// ============================================================================
+TEST_F(BPlusTreeTest, IndexIteratorBeginWithKeyExactAndLowerBound) {
+    BPlusTree<int, RID> tree("iter_begin_key", bpm_.get(), std::less<int>{}, 3, 3);
+
+    // Insert even numbers: 10, 20, 30, 40, 50, 60, 70, 80
+    for (int k = 10; k <= 80; k += 10) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    // Exact Match: Begin(30) should start exactly at 30
+    {
+        auto it = tree.Begin(30);
+        ASSERT_FALSE(it.IsEnd());
+        EXPECT_EQ(it->first, 30);
+        std::vector<int> remaining;
+        while (it != tree.End()) {
+            remaining.push_back(it->first);
+            ++it;
+        }
+        EXPECT_EQ(remaining, (std::vector<int>{30, 40, 50, 60, 70, 80}));
+    }
+
+    // Lower Bound: Begin(25) should start at 30
+    {
+        auto it = tree.Begin(25);
+        ASSERT_FALSE(it.IsEnd());
+        EXPECT_EQ(it->first, 30);
+    }
+
+    // Lower Bound before all keys: Begin(5) should start at 10
+    {
+        auto it = tree.Begin(5);
+        ASSERT_FALSE(it.IsEnd());
+        EXPECT_EQ(it->first, 10);
+    }
+
+    // Lower Bound between leaves: Begin(35) should start at 40
+    {
+        auto it = tree.Begin(35);
+        ASSERT_FALSE(it.IsEnd());
+        EXPECT_EQ(it->first, 40);
+    }
+
+    // Exact Match on last element: Begin(80)
+    {
+        auto it = tree.Begin(80);
+        ASSERT_FALSE(it.IsEnd());
+        EXPECT_EQ(it->first, 80);
+        ++it;
+        EXPECT_TRUE(it == tree.End());
+    }
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 53: IndexIterator Begin(key) Beyond Maximum Returns End()
+// ============================================================================
+TEST_F(BPlusTreeTest, IndexIteratorBeginWithKeyBeyondMaxReturnsEnd) {
+    BPlusTree<int, RID> tree("iter_beyond_max", bpm_.get(), std::less<int>{}, 4, 3);
+
+    for (int k : {10, 20, 30, 40, 50}) {
+        ASSERT_TRUE(tree.Insert(k, RID(1, static_cast<uint32_t>(k))));
+    }
+
+    auto it = tree.Begin(51);
+    EXPECT_TRUE(it == tree.End());
+
+    auto it2 = tree.Begin(999);
+    EXPECT_TRUE(it2 == tree.End());
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 54: IndexIterator Copy, Move, and Postfix Increment Operators
+// ============================================================================
+TEST_F(BPlusTreeTest, IndexIteratorCopyMoveAndPostfixOperators) {
+    BPlusTree<int, RID> tree("iter_copy_move", bpm_.get(), std::less<int>{}, 3, 3);
+
+    for (int i = 1; i <= 20; ++i) {
+        ASSERT_TRUE(tree.Insert(i, RID(1, static_cast<uint32_t>(i))));
+    }
+
+    {
+        // Test copy constructor
+        auto it1 = tree.Begin();
+        auto it2 = it1; // Copy
+        EXPECT_TRUE(it1 == it2);
+        EXPECT_EQ(it1->first, it2->first);
+
+        // Test postfix increment
+        auto it3 = it1++;
+        EXPECT_EQ(it3->first, 1);
+        EXPECT_EQ(it1->first, 2);
+        EXPECT_TRUE(it3 != it1);
+
+        // Test move constructor
+        auto it4 = std::move(it2);
+        EXPECT_EQ(it4->first, 1);
+        EXPECT_TRUE(it2.IsEnd());
+
+        // Test copy assignment
+        it4 = it1;
+        EXPECT_EQ(it4->first, 2);
+
+        // Test move assignment
+        auto it5 = tree.Begin(10);
+        it4 = std::move(it5);
+        EXPECT_EQ(it4->first, 10);
+        EXPECT_TRUE(it5.IsEnd());
+    }
+
+    AssertAllPagesUnpinned();
+}
+
+// ============================================================================
+// Test 55: IndexIterator Early Break Zero Pin Leaks
+// ============================================================================
+TEST_F(BPlusTreeTest, IndexIteratorEarlyTerminationZeroPinLeaks) {
+    BPlusTree<int, RID> tree("iter_early_break", bpm_.get(), std::less<int>{}, 3, 3);
+
+    for (int i = 1; i <= 50; ++i) {
+        ASSERT_TRUE(tree.Insert(i, RID(1, static_cast<uint32_t>(i))));
+    }
+
+    // Loop and break early in the middle of a leaf page
+    int seen = 0;
+    for (auto it = tree.Begin(); it != tree.End(); ++it) {
+        seen++;
+        if (it->first == 25) {
+            break; // Iterator destructed here while page is pinned!
+        }
+    }
+    EXPECT_EQ(seen, 25);
+
+    // Verify RAII cleanup: absolutely zero frames remain pinned
+    AssertAllPagesUnpinned();
+
+    // Loop and break at exact first entry
+    for (auto it = tree.Begin(); it != tree.End(); ++it) {
+        EXPECT_EQ(it->first, 1);
+        break;
+    }
+    AssertAllPagesUnpinned();
+
+    // Loop from Begin(key) and break early
+    for (auto it = tree.Begin(30); it != tree.End(); ++it) {
+        EXPECT_EQ(it->first, 30);
+        break;
+    }
+    AssertAllPagesUnpinned();
+}

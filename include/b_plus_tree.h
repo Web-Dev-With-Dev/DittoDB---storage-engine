@@ -28,6 +28,7 @@
 #include "b_plus_tree_header_page.h"
 #include "b_plus_tree_internal_page.h"
 #include "b_plus_tree_leaf_page.h"
+#include "index_iterator.h"
 #include "generic_key.h"
 
 /**
@@ -65,6 +66,10 @@ class BPlusTree {
 public:
     using LeafPage = BPlusTreeLeafPage<KeyType, ValueType, KeyComparator>;
     using InternalPage = BPlusTreeInternalPage<KeyType, page_id_t, KeyComparator>;
+    using INDEXITERATOR_TYPE = IndexIterator<KeyType, ValueType, KeyComparator>;
+    using Iterator = INDEXITERATOR_TYPE;
+    using const_iterator = INDEXITERATOR_TYPE;
+    using iterator = INDEXITERATOR_TYPE;
 
     /**
      * @brief Construct a new BPlusTree.
@@ -371,6 +376,94 @@ public:
         ValueType val;
         return GetValue(key, &val);
     }
+
+    // ==================== Leaf Chain Sequential Iteration (IndexIterator) ====================
+
+    /**
+     * @brief Get iterator pointing to the first (smallest) record in the tree (leftmost leaf, index 0).
+     * Returns End() if tree is empty.
+     *
+     * @return INDEXITERATOR_TYPE Iterator positioned at the first record, or End().
+     */
+    INDEXITERATOR_TYPE Begin() const {
+        std::shared_lock<std::shared_mutex> lock(*rwlock_);
+        if (IsEmpty()) {
+            return End();
+        }
+
+        Page *leaf_page = FindLeftmostLeafPage();
+        if (leaf_page == nullptr) {
+            return End();
+        }
+
+        auto *leaf = LeafPage::Cast(leaf_page);
+        if (leaf->GetSize() == 0) {
+            bpm_->UnpinPage(leaf_page->GetPageId(), false);
+            return End();
+        }
+
+        return INDEXITERATOR_TYPE(bpm_, leaf_page, 0);
+    }
+
+    INDEXITERATOR_TYPE begin() const { return Begin(); }
+    INDEXITERATOR_TYPE cbegin() const { return Begin(); }
+    INDEXITERATOR_TYPE Begin() { return const_cast<const BPlusTree *>(this)->Begin(); }
+    INDEXITERATOR_TYPE begin() { return Begin(); }
+
+    /**
+     * @brief Get iterator pointing to the first record with key >= search_key (lower bound).
+     * Navigates down from root to the appropriate leaf page and searches for the lower bound.
+     * If all keys in that leaf are < search_key, sequentially follows next_page_id in the leaf chain.
+     * Returns End() if the tree is empty or all keys in the tree are < search_key.
+     *
+     * @param key Search key (lower bound).
+     * @return INDEXITERATOR_TYPE Iterator positioned at the first qualifying record, or End().
+     */
+    INDEXITERATOR_TYPE Begin(const KeyType &key) const {
+        std::shared_lock<std::shared_mutex> lock(*rwlock_);
+        if (IsEmpty()) {
+            return End();
+        }
+
+        Page *curr_page = FindLeafPage(key, false);
+        if (curr_page == nullptr) {
+            return End();
+        }
+
+        while (curr_page != nullptr) {
+            auto *leaf = LeafPage::Cast(curr_page);
+            int idx = leaf->LowerBound(key, comparator_);
+            if (idx < leaf->GetSize()) {
+                return INDEXITERATOR_TYPE(bpm_, curr_page, idx);
+            }
+            page_id_t next_pid = leaf->GetNextPageId();
+            bpm_->UnpinPage(curr_page->GetPageId(), false);
+            if (next_pid == INVALID_PAGE_ID) {
+                return End();
+            }
+            curr_page = bpm_->FetchPage(next_pid);
+        }
+
+        return End();
+    }
+
+    INDEXITERATOR_TYPE Begin(const KeyType &key) {
+        return const_cast<const BPlusTree *>(this)->Begin(key);
+    }
+
+    /**
+     * @brief Get end-of-iteration sentinel iterator.
+     *
+     * @return INDEXITERATOR_TYPE Sentinel iterator.
+     */
+    INDEXITERATOR_TYPE End() const {
+        return INDEXITERATOR_TYPE();
+    }
+
+    INDEXITERATOR_TYPE end() const { return End(); }
+    INDEXITERATOR_TYPE cend() const { return End(); }
+    INDEXITERATOR_TYPE End() { return INDEXITERATOR_TYPE(); }
+    INDEXITERATOR_TYPE end() { return INDEXITERATOR_TYPE(); }
 
     // ==================== Insertion & Tree Growth ====================
 
