@@ -1,0 +1,7 @@
+CompileFlags:
+  Add:
+    - --target=x86_64-w64-mingw32
+    - -isystemC:/msys64/ucrt64/include/c++/16.1.0
+    - -isystemC:/msys64/ucrt64/include/c++/16.1.0/x86_64-w64-mingw32
+    - -isystemC:/msys64/ucrt64/include/c++/16.1.0/backward
+    - -isystemC:/msys64/ucrt64/include
