@@ -47,7 +47,16 @@ set(COMMON_SOURCES
     src/buffer_pool_manager.cpp
     src/table_page.cpp
     src/table_heap.cpp
+    src/tuple.cpp
+    src/rid.cpp
     src/extendible_htable_directory_page.cpp
+    src/extendible_htable_bucket_page.cpp
+    src/extendible_hash_table.cpp
+    src/b_plus_tree_header_page.cpp
+    src/b_plus_tree_leaf_page.cpp
+    src/b_plus_tree_internal_page.cpp
+    src/index_iterator.cpp
+    src/b_plus_tree.cpp
 )
 
 set(COMMON_HEADERS

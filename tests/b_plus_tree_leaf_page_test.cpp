@@ -291,9 +291,7 @@ TEST_F(BPlusTreeLeafPageTest, InPlacePageBufferTransmutation) {
 // Test 10: Custom Comparator Support
 // ============================================================================
 TEST_F(BPlusTreeLeafPageTest, CustomComparatorSupport) {
-    struct GreaterComp {
-        bool operator()(int a, int b) const { return a > b; }
-    };
+    using GreaterComp = std::greater<int>;
 
     using DescendingLeafPage = BPlusTreeLeafPage<int, RID, GreaterComp>;
     DescendingLeafPage page;

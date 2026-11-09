@@ -47,39 +47,21 @@ public:
      * @param root_page_id The initial root page ID (default: INVALID_PAGE_ID).
      * @param key_size Optional indexed key size.
      */
-    void Init(page_id_t header_page_id, page_id_t root_page_id = INVALID_PAGE_ID, uint32_t key_size = 0) {
-        page_type_ = PageType::BPLUS_TREE_HEADER_PAGE;
-        lsn_ = 0;
-        root_page_id_ = root_page_id;
-        header_page_id_ = header_page_id;
-        key_size_ = key_size;
-        depth_ = (root_page_id == INVALID_PAGE_ID) ? 0 : 1;
-        record_count_ = 0;
-    }
+    void Init(page_id_t header_page_id, page_id_t root_page_id = INVALID_PAGE_ID, uint32_t key_size = 0);
 
     /**
      * @brief Reinterpret cast a raw Page pointer into a typed BPlusTreeHeaderPage pointer.
      * @param page Raw memory Page pointer.
      * @return BPlusTreeHeaderPage* In-place typed pointer.
      */
-    static BPlusTreeHeaderPage *Cast(Page *page) {
-        if (page == nullptr) {
-            return nullptr;
-        }
-        return reinterpret_cast<BPlusTreeHeaderPage *>(page->GetData());
-    }
+    static BPlusTreeHeaderPage *Cast(Page *page);
 
     /**
      * @brief Reinterpret cast a const raw Page pointer into a const BPlusTreeHeaderPage pointer.
      * @param page Const raw memory Page pointer.
      * @return const BPlusTreeHeaderPage* In-place typed const pointer.
      */
-    static const BPlusTreeHeaderPage *Cast(const Page *page) {
-        if (page == nullptr) {
-            return nullptr;
-        }
-        return reinterpret_cast<const BPlusTreeHeaderPage *>(page->GetData());
-    }
+    static const BPlusTreeHeaderPage *Cast(const Page *page);
 
     // ==================== Root Page ID Accessors ====================
 
@@ -87,116 +69,81 @@ public:
      * @brief Get the physical page ID of the current B+ tree root.
      * @return page_id_t Root page ID, or INVALID_PAGE_ID if the tree is empty.
      */
-    page_id_t GetRootPageId() const {
-        return root_page_id_;
-    }
+    page_id_t GetRootPageId() const;
 
     /**
      * @brief Update the root page ID (called when root splits, merges, or is initialized).
      * @param root_page_id New root page ID.
      */
-    void SetRootPageId(page_id_t root_page_id) {
-        root_page_id_ = root_page_id;
-        if (root_page_id == INVALID_PAGE_ID) {
-            depth_ = 0;
-        } else if (depth_ == 0) {
-            depth_ = 1;
-        }
-    }
+    void SetRootPageId(page_id_t root_page_id);
 
     /**
      * @brief Check whether the tree currently has an active root.
      * @return true if root_page_id != INVALID_PAGE_ID, false otherwise.
      */
-    bool HasRoot() const {
-        return root_page_id_ != INVALID_PAGE_ID;
-    }
+    bool HasRoot() const;
 
     // ==================== Metadata Accessors ====================
 
     /**
      * @brief Get the header anchor page ID.
      */
-    page_id_t GetHeaderPageId() const {
-        return header_page_id_;
-    }
+    page_id_t GetHeaderPageId() const;
 
     /**
      * @brief Set the header anchor page ID.
      */
-    void SetHeaderPageId(page_id_t header_page_id) {
-        header_page_id_ = header_page_id;
-    }
+    void SetHeaderPageId(page_id_t header_page_id);
 
     /**
      * @brief Get page type discriminator.
      */
-    PageType GetPageType() const {
-        return page_type_;
-    }
+    PageType GetPageType() const;
 
     /**
      * @brief Get Log Sequence Number (LSN) for WAL.
      */
-    lsn_t GetLSN() const {
-        return lsn_;
-    }
+    lsn_t GetLSN() const;
 
     /**
      * @brief Set Log Sequence Number (LSN) for WAL.
      */
-    void SetLSN(lsn_t lsn) {
-        lsn_ = lsn;
-    }
+    void SetLSN(lsn_t lsn);
 
     /**
      * @brief Get indexed key size.
      */
-    uint32_t GetKeySize() const {
-        return key_size_;
-    }
+    uint32_t GetKeySize() const;
 
     /**
      * @brief Set indexed key size.
      */
-    void SetKeySize(uint32_t key_size) {
-        key_size_ = key_size;
-    }
+    void SetKeySize(uint32_t key_size);
 
     /**
      * @brief Get current depth of the tree.
      */
-    uint32_t GetDepth() const {
-        return depth_;
-    }
+    uint32_t GetDepth() const;
 
     /**
      * @brief Set current depth of the tree.
      */
-    void SetDepth(uint32_t depth) {
-        depth_ = depth;
-    }
+    void SetDepth(uint32_t depth);
 
     /**
      * @brief Get total active record count in the tree.
      */
-    uint64_t GetRecordCount() const {
-        return record_count_;
-    }
+    uint64_t GetRecordCount() const;
 
     /**
      * @brief Set total active record count in the tree.
      */
-    void SetRecordCount(uint64_t count) {
-        record_count_ = count;
-    }
+    void SetRecordCount(uint64_t count);
 
     /**
      * @brief Increment or decrement active record count.
      */
-    void IncreaseRecordCount(int64_t amount) {
-        record_count_ += amount;
-    }
+    void IncreaseRecordCount(int64_t amount);
 
 private:
     PageType page_type_{PageType::BPLUS_TREE_HEADER_PAGE}; // 4B

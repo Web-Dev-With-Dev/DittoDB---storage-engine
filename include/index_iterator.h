@@ -54,156 +54,73 @@ public:
      * @param page Pointer to currently pinned leaf page.
      * @param index Slot index within the leaf page (0 <= index <= size).
      */
-    IndexIterator(BufferPoolManager *bpm, Page *page, int index = 0)
-        : bpm_(bpm), page_(page), page_id_(page != nullptr ? page->GetPageId() : INVALID_PAGE_ID), index_(index) {
-        // If constructed pointing to an empty leaf or beyond size, advance immediately
-        if (page_ != nullptr) {
-            auto *leaf = LeafPage::Cast(page_);
-            if (index_ >= leaf->GetSize()) {
-                AdvanceToNextValidLeaf();
-            }
-        }
-    }
+    IndexIterator(BufferPoolManager *bpm, Page *page, int index = 0);
 
     /**
      * @brief Destructor unpins currently held leaf page to guarantee zero pin leaks.
      */
-    ~IndexIterator() {
-        ReleaseCurrentPage();
-    }
+    ~IndexIterator();
 
     /**
      * @brief Copy constructor increments buffer pool pin count on the held page.
      */
-    IndexIterator(const IndexIterator &other)
-        : bpm_(other.bpm_), page_(other.page_), page_id_(other.page_id_), index_(other.index_) {
-        if (bpm_ != nullptr && page_ != nullptr && page_id_ != INVALID_PAGE_ID) {
-            bpm_->FetchPage(page_id_);
-        }
-    }
+    IndexIterator(const IndexIterator &other);
 
     /**
      * @brief Copy assignment operator with proper pin management.
      */
-    IndexIterator &operator=(const IndexIterator &other) {
-        if (this != &other) {
-            ReleaseCurrentPage();
-            bpm_ = other.bpm_;
-            page_ = other.page_;
-            page_id_ = other.page_id_;
-            index_ = other.index_;
-            if (bpm_ != nullptr && page_ != nullptr && page_id_ != INVALID_PAGE_ID) {
-                bpm_->FetchPage(page_id_);
-            }
-        }
-        return *this;
-    }
+    IndexIterator &operator=(const IndexIterator &other);
 
     /**
      * @brief Move constructor transfers held page pin ownership without changing pin count.
      */
-    IndexIterator(IndexIterator &&other) noexcept
-        : bpm_(other.bpm_), page_(other.page_), page_id_(other.page_id_), index_(other.index_) {
-        other.page_ = nullptr;
-        other.page_id_ = INVALID_PAGE_ID;
-        other.index_ = 0;
-        other.bpm_ = nullptr;
-    }
+    IndexIterator(IndexIterator &&other) noexcept;
 
     /**
      * @brief Move assignment operator transfers held page pin ownership.
      */
-    IndexIterator &operator=(IndexIterator &&other) noexcept {
-        if (this != &other) {
-            ReleaseCurrentPage();
-            bpm_ = other.bpm_;
-            page_ = other.page_;
-            page_id_ = other.page_id_;
-            index_ = other.index_;
-            other.page_ = nullptr;
-            other.page_id_ = INVALID_PAGE_ID;
-            other.index_ = 0;
-            other.bpm_ = nullptr;
-        }
-        return *this;
-    }
+    IndexIterator &operator=(IndexIterator &&other) noexcept;
 
     /**
      * @brief Check whether iterator has reached the end of the B+ Tree leaf chain.
      */
-    bool IsEnd() const {
-        return page_ == nullptr || page_id_ == INVALID_PAGE_ID;
-    }
+    bool IsEnd() const;
 
     /**
      * @brief Explicit boolean conversion checking if iterator currently points to a valid entry.
      */
-    explicit operator bool() const {
-        return !IsEnd();
-    }
+    explicit operator bool() const;
 
     /**
      * @brief Dereference operator returning reference to current (key, value) pair.
      */
-    const MappingType &operator*() const {
-        assert(!IsEnd() && page_ != nullptr && index_ >= 0);
-        const auto *leaf = LeafPage::Cast(page_);
-        return leaf->ItemAt(index_);
-    }
+    const MappingType &operator*() const;
 
     /**
      * @brief Member access operator returning pointer to current (key, value) pair.
      */
-    const MappingType *operator->() const {
-        assert(!IsEnd() && page_ != nullptr && index_ >= 0);
-        const auto *leaf = LeafPage::Cast(page_);
-        return &leaf->ItemAt(index_);
-    }
+    const MappingType *operator->() const;
 
     /**
      * @brief Prefix increment operator: advances to next entry across the leaf chain.
      * Safely no-ops if iterator has already reached End().
      */
-    IndexIterator &operator++() {
-        if (IsEnd() || page_ == nullptr) {
-            return *this;
-        }
-        index_++;
-        auto *leaf = LeafPage::Cast(page_);
-        if (index_ >= leaf->GetSize()) {
-            AdvanceToNextValidLeaf();
-        }
-        return *this;
-    }
+    IndexIterator &operator++();
 
     /**
      * @brief Postfix increment operator.
      */
-    IndexIterator operator++(int) {
-        IndexIterator temp = *this;
-        ++(*this);
-        return temp;
-    }
+    IndexIterator operator++(int);
 
     /**
      * @brief Equality comparison operator.
      */
-    bool operator==(const IndexIterator &other) const {
-        if (IsEnd() && other.IsEnd()) {
-            return true;
-        }
-        if (IsEnd() || other.IsEnd()) {
-            return false;
-        }
-        return page_id_ == other.page_id_ && index_ == other.index_;
-    }
+    bool operator==(const IndexIterator &other) const;
 
     /**
      * @brief Inequality comparison operator.
      */
-    bool operator!=(const IndexIterator &other) const {
-        return !(*this == other);
-    }
+    bool operator!=(const IndexIterator &other) const;
 
     // ==================== Diagnostic Accessors ====================
     int GetIndex() const { return index_; }
@@ -222,44 +139,12 @@ private:
     /**
      * @brief Safely unpin the currently held page in BufferPoolManager.
      */
-    void ReleaseCurrentPage() {
-        if (bpm_ != nullptr && page_ != nullptr && page_id_ != INVALID_PAGE_ID) {
-            bpm_->UnpinPage(page_id_, false);
-            page_ = nullptr;
-            page_id_ = INVALID_PAGE_ID;
-            index_ = 0;
-        }
-    }
+    void ReleaseCurrentPage();
 
     /**
      * @brief Advance through next_page_id pointers until a non-empty leaf is reached or leaf chain ends.
      */
-    void AdvanceToNextValidLeaf() {
-        while (page_ != nullptr) {
-            auto *leaf = LeafPage::Cast(page_);
-            page_id_t next_page_id = leaf->GetNextPageId();
-            ReleaseCurrentPage();
-
-            if (next_page_id == INVALID_PAGE_ID || bpm_ == nullptr) {
-                break;
-            }
-
-            Page *next_page = bpm_->FetchPage(next_page_id);
-            if (next_page == nullptr) {
-                break;
-            }
-
-            page_ = next_page;
-            page_id_ = next_page_id;
-            index_ = 0;
-
-            auto *next_leaf = LeafPage::Cast(page_);
-            if (next_leaf->GetSize() > 0) {
-                break;
-            }
-            // If next_leaf has size 0, loop continues to next sibling
-        }
-    }
+    void AdvanceToNextValidLeaf();
 
     BufferPoolManager *bpm_{nullptr};
     Page *page_{nullptr};

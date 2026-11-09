@@ -31,7 +31,7 @@ public:
      * @brief Construct a Tuple with a given RID and empty data.
      * @param rid The record identifier.
      */
-    explicit Tuple(RID rid) : rid_(rid) {}
+    explicit Tuple(RID rid);
 
     /**
      * @brief Construct a Tuple from a raw byte buffer.
@@ -39,40 +39,35 @@ public:
      * @param size Number of bytes.
      * @param rid Optional record identifier (default: invalid RID).
      */
-    Tuple(const char *data, uint32_t size, RID rid = {})
-        : rid_(rid), data_(data, data + size) {}
+    Tuple(const char *data, uint32_t size, RID rid = {});
 
     /**
      * @brief Construct a Tuple from a std::string_view.
      * @param sv String view of bytes.
      * @param rid Optional record identifier (default: invalid RID).
      */
-    Tuple(std::string_view sv, RID rid = {})
-        : rid_(rid), data_(sv.begin(), sv.end()) {}
+    Tuple(std::string_view sv, RID rid = {});
 
     /**
      * @brief Construct a Tuple from a std::string.
      * @param str Source string.
      * @param rid Optional record identifier (default: invalid RID).
      */
-    Tuple(const std::string &str, RID rid = {})
-        : rid_(rid), data_(str.begin(), str.end()) {}
+    Tuple(const std::string &str, RID rid = {});
 
     /**
      * @brief Construct a Tuple from a null-terminated C string.
      * @param str Null-terminated string.
      * @param rid Optional record identifier (default: invalid RID).
      */
-    Tuple(const char *str, RID rid = {})
-        : rid_(rid), data_(str, str + std::strlen(str)) {}
+    Tuple(const char *str, RID rid = {});
 
     /**
      * @brief Construct a Tuple by moving an existing vector of bytes.
      * @param data Vector of bytes.
      * @param rid Optional record identifier (default: invalid RID).
      */
-    Tuple(std::vector<char> data, RID rid = {})
-        : rid_(rid), data_(std::move(data)) {}
+    Tuple(std::vector<char> data, RID rid = {});
 
     /**
      * @brief Get the RID associated with this tuple.
@@ -114,17 +109,13 @@ public:
      * @brief View tuple payload as std::string_view without copying.
      * @return String view of tuple data.
      */
-    std::string_view AsStringView() const {
-        return std::string_view(data_.data(), data_.size());
-    }
+    std::string_view AsStringView() const;
 
     /**
      * @brief View tuple payload as std::span<const char> without copying.
      * @return Byte span.
      */
-    std::span<const char> AsSpan() const {
-        return std::span<const char>(data_.data(), data_.size());
-    }
+    std::span<const char> AsSpan() const;
 
     /**
      * @brief Check whether this tuple contains zero bytes of data.
@@ -135,14 +126,10 @@ public:
     /**
      * @brief Equality comparison between two tuples (both RID and data must match).
      */
-    bool operator==(const Tuple &other) const {
-        return rid_ == other.rid_ && data_ == other.data_;
-    }
+    bool operator==(const Tuple &other) const;
 
     /**
      * @brief Inequality comparison between two tuples.
      */
-    bool operator!=(const Tuple &other) const {
-        return !(*this == other);
-    }
+    bool operator!=(const Tuple &other) const;
 };

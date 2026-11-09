@@ -156,18 +156,13 @@ public:
      * @brief Format RID as human-readable string: "[page_id, slot_num]".
      * @return Formatted string.
      */
-    std::string ToString() const {
-        return "[" + std::to_string(page_id_) + ", " + std::to_string(slot_num_) + "]";
-    }
+    std::string ToString() const;
 };
 
 /**
  * @brief Stream insertion operator for formatted output and logging.
  */
-inline std::ostream &operator<<(std::ostream &os, const RID &rid) {
-    os << rid.ToString();
-    return os;
-}
+std::ostream &operator<<(std::ostream &os, const RID &rid);
 
 /**
  * @brief Hash specialization allowing RID to be used as key in unordered containers.

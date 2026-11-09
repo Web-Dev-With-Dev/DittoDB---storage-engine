@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
-  <img src="https://img.shields.io/badge/Tests-267%2F267%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-309%2F309%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier%20Storage-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Sanitizers-TSan%20%7C%20Helgrind%20Clean-success.svg" alt="Sanitizers" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
@@ -21,6 +21,7 @@
 
 ## Table of Contents
 - [Architecture Overview](#architecture-overview)
+- [Project Structure & Modular Decoupling](#project-structure--modular-decoupling)
 - [Core Components & API Reference](#core-components--api-reference)
   - [1. Persistent Disk Storage (`DiskManager`)](#1-persistent-disk-storage-diskmanager)
   - [2. In-Memory Frames & Latches (`Page`)](#2-in-memory-frames--latches-page)
@@ -29,14 +30,15 @@
   - [5. Slotted-Page Physical Storage (`TablePage`, `Tuple`, `RID`)](#5-slotted-page-physical-storage-tablepage-tuple-rid)
   - [6. Multi-Page Table Heap (`TableHeap`, `TableIterator`)](#6-multi-page-table-heap-tableheap-tableiterator)
   - [7. Buffer-Pool-Backed Hash Index (`ExtendibleHashTable`)](#7-buffer-pool-backed-hash-index-extendiblehashtable)
-  - [8. B+ Tree Index Node Architecture (`BPlusTreePage`, `BPlusTreeInternalPage`, `BPlusTreeLeafPage`, `BPlusTreeHeaderPage`)](#8-b-tree-index-node-architecture-bplustreepage-bplustreeinternalpage-bplustreeleafpage-bplustreeheaderpage)
+  - [8. B+ Tree Index Architecture (`BPlusTree`, `InternalPage`, `LeafPage`, `HeaderPage`, `IndexIterator`)](#8-b-tree-index-architecture-bplustree-bplustreepage-bplustreeinternalpage-bplustreeleafpage-bplustreeheaderpage)
+- [Benchmark Suite & Performance Analysis](#benchmark-suite--performance-analysis)
 - [Key Engineering Trade-Offs](#key-engineering-trade-offs)
   - [Trade-off 1: Replacement Policy Selection (LRU vs. CLOCK vs. 2Q vs. LRU-K)](#trade-off-1-replacement-policy-selection-lru-vs-clock-vs-2q-vs-lru-k)
   - [Trade-off 2: Latching Granularity & Deadlock Avoidance Hierarchy](#trade-off-2-latching-granularity--deadlock-avoidance-hierarchy)
   - [Trade-off 3: Slotted Page Layout & Update Strategies (In-Place vs Migration)](#trade-off-3-slotted-page-layout--update-strategies-in-place-vs-migration)
 - [Test Suite & Verification](#test-suite--verification)
-  - [CMU 15-445 Project #1 Compliance](#cmu-15-445-project-1-compliance)
-  - [Test Suite Coverage Breakdown (244/244 Passing)](#test-suite-coverage-breakdown-244244-passing)
+  - [CMU 15-445 Project Compliance](#cmu-15-445-project-1-compliance)
+  - [Test Suite Coverage Breakdown (309/309 Passing)](#test-suite-coverage-breakdown-244244-passing)
   - [ThreadSanitizer & Helgrind Verification](#threadsanitizer--helgrind-verification)
 - [Build & Run](#build--run)
 - [Design Documents & Deep-Dives](#design-documents--deep-dives)
@@ -75,6 +77,57 @@ DittoDB is built on a clean, decoupled 5-tier architecture where each storage la
 │  - DiskManager: Page-addressed 4096-byte block file I/O                     │
 │  - Monotonic page allocation, zero-padded sparse writes, integrity checks   │
 └─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Project Structure & Modular Decoupling
+
+DittoDB adheres strictly to the **CMU 15-445 / BusTub modular architectural standard**: clean declarations reside in `include/*.h`, while implementations and algorithms reside in `src/*.cpp` with explicit template instantiations. This guarantees fast incremental compilation, eliminates circular header dependencies, and cleanly separates API interfaces from engine execution logic:
+
+```
+database-engine/
+├── include/                                # Pure class interfaces & declarative headers
+│   ├── config.h                            # Global database constants (PAGE_SIZE = 4096)
+│   ├── common_page_header.h                # Canonical 24-byte in-frame page header
+│   ├── page.h                              # Buffer pool memory frame & R/W latch
+│   ├── disk_manager.h                      # Block I/O interface
+│   ├── lru_k_replacer.h                    # Scan-resistant cache replacer
+│   ├── buffer_pool_manager.h               # Pinned frame coordinator
+│   ├── rid.h                               # Record ID [page_id, slot_num]
+│   ├── tuple.h                             # Physical record payload wrapper
+│   ├── table_page.h                        # Dual-end growth slotted page layout
+│   ├── table_heap.h                        # Multi-page linked table heap
+│   ├── extendible_htable_directory_page.h  # Hash directory layout & depths
+│   ├── extendible_htable_bucket_page.h     # Hash bucket storage layout
+│   ├── extendible_hash_table.h             # Dynamic hash table index
+│   ├── b_plus_tree_page.h                  # Base B+ tree node casting wrapper
+│   ├── b_plus_tree_header_page.h           # Persistent root anchor & recovery page
+│   ├── b_plus_tree_internal_page.h         # Internal routing node layout
+│   ├── b_plus_tree_leaf_page.h             # Leaf data node layout & next pointers
+│   ├── index_iterator.h                    # Sequential leaf-chain iterator
+│   ├── b_plus_tree.h                       # B+ tree storage engine class declaration
+│   └── generic_key.h                       # Big-endian order-preserving key serializer
+├── src/                                    # Concrete implementations & explicit template instantiations
+│   ├── page.cpp                            # Page frame latches & memory accessors
+│   ├── disk_manager.cpp                    # POSIX/Win32 file I/O operations
+│   ├── lru_k_replacer.cpp                  # Backward K-distance tracking & queues
+│   ├── buffer_pool_manager.cpp             # Frame management & eviction orchestration
+│   ├── rid.cpp                             # Record ID formatting & stream operator
+│   ├── tuple.cpp                           # Record payload construction & views
+│   ├── table_page.cpp                      # Slotted page inserts, updates, defrag
+│   ├── table_heap.cpp                      # Table chaining, cross-page migration
+│   ├── extendible_htable_directory_page.cpp# Directory growth, split masks, bitwise hashing
+│   ├── extendible_htable_bucket_page.cpp   # Bucket key-value inserts, lookups, removals
+│   ├── extendible_hash_table.cpp           # Bucket splitting & directory expansion
+│   ├── b_plus_tree_header_page.cpp         # Root ID persistence & accounting
+│   ├── b_plus_tree_internal_page.cpp       # Internal binary search & child reparenting
+│   ├── b_plus_tree_leaf_page.cpp           # Leaf binary search & sorted insertion
+│   ├── index_iterator.cpp                  # RAII leaf chain navigation & pin releases
+│   └── b_plus_tree.cpp                     # Full B+ Tree algorithms (splits, merges, scans)
+├── benchmarks/                             # High-throughput storage benchmarks
+│   └── b_plus_tree_benchmark.cpp           # Bulk insert, point lookup, scan & I/O suite
+└── tests/                                  # 17 Google Test suites (309 tests, 100% pass)
 ```
 
 ---
@@ -161,7 +214,7 @@ void FlushAllPages();
 
 ### 5. Slotted-Page Physical Storage (`TablePage`, `Tuple`, `RID`)
 - **Headers:** [`include/table_page.h`](include/table_page.h) · [`include/tuple.h`](include/tuple.h) · [`include/rid.h`](include/rid.h)
-- **Source:** [`src/table_page.cpp`](src/table_page.cpp) · [`src/tuple.cpp`](src/tuple.cpp)
+- **Source:** [`src/table_page.cpp`](src/table_page.cpp) · [`src/tuple.cpp`](src/tuple.cpp) · [`src/rid.cpp`](src/rid.cpp)
 - **Design Deep-Dive:** [`docs/slotted_page_design.md`](docs/slotted_page_design.md)
 
 Implements the classic PostgreSQL/SQLite slotted-page architecture directly on top of raw 4096-byte `Page` buffers:
@@ -210,7 +263,7 @@ Page 0 (TablePage)               Page 1 (TablePage)               Page 2 (TableP
 
 ### 7. Buffer-Pool-Backed Hash Index (`ExtendibleHashTable`)
 - **Headers:** [`include/extendible_hash_table.h`](include/extendible_hash_table.h) · [`include/extendible_htable_directory_page.h`](include/extendible_htable_directory_page.h) · [`include/extendible_htable_bucket_page.h`](include/extendible_htable_bucket_page.h)
-- **Source:** [`src/extendible_hash_table.cpp`](src/extendible_hash_table.cpp)
+- **Source:** [`src/extendible_hash_table.cpp`](src/extendible_hash_table.cpp) · [`src/extendible_htable_directory_page.cpp`](src/extendible_htable_directory_page.cpp) · [`src/extendible_htable_bucket_page.cpp`](src/extendible_htable_bucket_page.cpp)
 
 A disk-backed, buffer-pool-managed dynamic hash index:
 - **Directory Page:** Tracks global depth ($D$), local depths ($d_i$), and bucket page IDs.
@@ -220,7 +273,8 @@ A disk-backed, buffer-pool-managed dynamic hash index:
 ---
 
 ### 8. B+ Tree Index Architecture (`BPlusTree`, `BPlusTreePage`, `BPlusTreeInternalPage`, `BPlusTreeLeafPage`, `BPlusTreeHeaderPage`)
-- **Headers:** [`include/b_plus_tree.h`](include/b_plus_tree.h) · [`include/common_page_header.h`](include/common_page_header.h) · [`include/b_plus_tree_page.h`](include/b_plus_tree_page.h) · [`include/b_plus_tree_internal_page.h`](include/b_plus_tree_internal_page.h) · [`include/b_plus_tree_leaf_page.h`](include/b_plus_tree_leaf_page.h) · [`include/b_plus_tree_header_page.h`](include/b_plus_tree_header_page.h) · [`include/generic_key.h`](include/generic_key.h)
+- **Headers:** [`include/b_plus_tree.h`](include/b_plus_tree.h) · [`include/b_plus_tree_header_page.h`](include/b_plus_tree_header_page.h) · [`include/b_plus_tree_internal_page.h`](include/b_plus_tree_internal_page.h) · [`include/b_plus_tree_leaf_page.h`](include/b_plus_tree_leaf_page.h) · [`include/index_iterator.h`](include/index_iterator.h) · [`include/b_plus_tree_page.h`](include/b_plus_tree_page.h) · [`include/common_page_header.h`](include/common_page_header.h) · [`include/generic_key.h`](include/generic_key.h)
+- **Source:** [`src/b_plus_tree.cpp`](src/b_plus_tree.cpp) · [`src/b_plus_tree_header_page.cpp`](src/b_plus_tree_header_page.cpp) · [`src/b_plus_tree_internal_page.cpp`](src/b_plus_tree_internal_page.cpp) · [`src/b_plus_tree_leaf_page.cpp`](src/b_plus_tree_leaf_page.cpp) · [`src/index_iterator.cpp`](src/index_iterator.cpp)
 
 DittoDB features an in-place B+ Tree index storage layer built directly on top of 4096-byte `Page` memory frames without dynamic heap allocations inside node blocks. All node types inherit from a shared 24-byte header enabling polymorphic type inspection, WAL logging, and zero-copy reinterpret casting:
 
@@ -341,7 +395,29 @@ The B+ Tree dynamically grows in depth through hierarchical splits:
 - **Root Split (`CreateNewRoot`):** When any root node (leaf or internal) splits, `CreateNewRoot` allocates a new internal root page, initializes it with `INVALID_PAGE_ID` parent, populates it with `(old_root_pid, separator_key, new_sibling_pid)`, updates parent pointers on both children, updates `root_page_id_`, synchronizes the persistent `BPlusTreeHeaderPage` with `depth + 1`, and unpins the new root dirty.
 - **Strict Pinning Invariant:** Every page fetched or created across recursive splits is guaranteed to be unpinned (`is_dirty = true` on mutations, `false` on errors).
 
-#### 8. Structural Invariant Validator & Graphviz Diagnostics
+#### 8. Deletion, Underflow & Merging Algorithms
+Deletions strictly preserve B+ Tree occupancy and ordering invariants:
+- **Leaf Record Deletion (`Remove(key)`):** Locates target leaf via `FindLeafPage`, removes entry in $O(\log M + M)$ via in-place left-shifting, decrements header record count, and checks for underflow ($size < \text{min\_size}$).
+- **Sibling Borrowing (Redistribution):** When an underflowing node has a left or right sibling with spare capacity ($size > \text{min\_size}$):
+  - *Leaf Redistribution:* Borrows one entry (`MoveLastToFrontOf` / `MoveFirstToEndOf`) and updates the parent separator key.
+  - *Internal Redistribution:* Pulls down the parent separator key into the underflowing node, pushes up the borrowed sibling's boundary key, and reparents the borrowed child frame.
+- **Page Merging (Coalescing):** If neither sibling has spare entries, the node coalesces with an adjacent sibling:
+  - *Leaf Coalesce:* Moves all entries to the surviving sibling, bridges `next_page_id`, deletes the parent separator entry, and deletes the empty page frame via `bpm_->DeletePage()`.
+  - *Internal Coalesce:* Pulls down the parent separator key, concatenates child pointers, reparents all moved children, deletes the parent pointer, and deletes the merged page frame.
+- **Cascaded Root Collapse (`AdjustRoot`):** When the root shrinks:
+  - If an internal root shrinks to 1 child, that child is promoted to become the new root (depth decreases by 1), and the old root frame is deleted.
+  - If a leaf root shrinks to 0 entries, the tree cleanly transitions back to empty (`root_page_id_ = INVALID_PAGE_ID`, depth = 0).
+
+#### 9. Sequential Leaf Traversal & Range Scans (`IndexIterator`, `RangeScan`)
+- **`IndexIterator`:** A forward iterator traversing the leaf chain with strict RAII buffer pool frame management. Keeps the current leaf page pinned while referencing elements (`operator*`, `operator->`), unpins and fetches adjacent sibling leaves when crossing page boundaries, and safely no-ops at `End()` with **zero pin leaks**.
+- **Lower Bound Lookup (`Begin(key)`):** Quickly positions the iterator at the first entry $\ge key$ using binary search down the tree hierarchy.
+- **Range Scans (`RangeScan`):** Scans all records within a closed interval $[low\_key, high\_key]$ with minimal overhead:
+  ```cpp
+  size_t RangeScan(const KeyType &low_key, const KeyType &high_key,
+                   std::vector<std::pair<KeyType, ValueType>> *result) const;
+  ```
+
+#### 10. Structural Invariant Validator & Graphviz Diagnostics
 To ensure rock-solid indexing consistency under extreme concurrent updates and cascading splits, DittoDB provides complete native diagnostic and validation capabilities:
 - **`ValidateTree()` & `CheckIntegrity()`:** Performs full hierarchical BFS inspection verifying:
   1. *Root Invariants:* Proper initialization, zero parent pointer, correct root sizing.
@@ -352,6 +428,31 @@ To ensure rock-solid indexing consistency under extreme concurrent updates and c
   6. *Depth Consistency:* Validates that all leaves reside at identical depths matching header `depth_`.
   7. *Strict Zero Pin Leaks:* Guarantees 100% of buffer frames fetched during validation are unpinned.
 - **Graphviz DOT Dump (`ToDot()`, `DumpGraphviz()`):** Generates clean, human-readable Graphviz representations rendering internal nodes (ports and separator keys) in `#E8EEF5`, leaf nodes (sorted key-value slots) in `#E8F5E9`, parent-child directed edges, and horizontal dashed green links along the sequential leaf chain.
+
+---
+
+## Benchmark Suite & Performance Analysis
+
+DittoDB includes an extensive storage engine benchmarking harness (`benchmarks/b_plus_tree_benchmark.cpp`) comparing bulk inserts, sequential scans, point lookups, and range queries under both warm-cache and heavily constrained buffer pool regimes:
+
+```bash
+# Execute standalone benchmark suite
+./build/b_plus_tree_benchmark.exe
+```
+
+### Measured Performance Profile
+
+| Benchmark Scenario | Dataset Scale | Buffer Pool Size | Throughput | Avg Latency | Cache Hit Ratio | Disk I/O Operations |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Full Table Scan** | 50,000 keys | 5,000 frames (Warm) | **585,024 ops/sec** | **1.71 µs** | 100.0% | 0 reads, 0 writes |
+| **Bulk Insert (Random)** | 50,000 keys | 5,000 frames (Warm) | **10,360 ops/sec** | **96.52 µs** | 100.0% | 0 reads, 0 writes |
+| **Bulk Insert (Sequential)** | 50,000 keys | 5,000 frames (Warm) | **8,934 ops/sec** | **111.93 µs** | 100.0% | 0 reads, 0 writes |
+| **Point Lookup (Sequential)**| 50,000 keys | 5,000 frames (Warm) | **6,110 ops/sec** | **163.65 µs** | 100.0% | 0 reads, 0 writes |
+| **Range Scan (Short: 10)** | 1,000 ops | 5,000 frames (Warm) | **3,666 ops/sec** | **272.80 µs** | 100.0% | 0 reads, 0 writes |
+| **Full Table Scan** | 25,000 keys | 64 frames (Constrained) | **2,192,175 ops/sec** | **0.46 µs** | 3.1% | 1,519 reads, 0 writes |
+| **Bulk Insert (Sequential)** | 25,000 keys | 64 frames (Constrained) | **164,013 ops/sec** | **6.10 µs** | 100.0% | 60 reads, 1,663 writes |
+| **Bulk Insert (Random)** | 25,000 keys | 64 frames (Constrained) | **51,768 ops/sec** | **19.32 µs** | 88.0% | 22k reads, 22.5k writes |
+| **Point Lookup (Hit)** | 25,000 keys | 64 frames (Constrained) | **49,158 ops/sec** | **20.34 µs** | 49.6% | 63k reads, 61 writes |
 
 ---
 
@@ -426,7 +527,7 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 - **LRU-K Replacer:** Canonical sample test (frames 1..5), FIFO tie-breaking for frames with $< K$ accesses, post-eviction history wiping, idempotent `SetEvictable` calls, dynamic cold-to-hot queue migration.
 - **Buffer Pool Manager:** Canonical 10-page cycle, full 4096-byte randomized binary payloads with embedded null bytes (`\0`), `NewPage(nullptr)` parameter safety, sticky dirty bit persistence across interleaved unpins, unpinned dirty page deletion, and destructor flush persistence.
 
-### Test Suite Coverage Breakdown (266/266 Passing)
+### Test Suite Coverage Breakdown (309/309 Passing)
 
 | Test Suite | Tests | Features Covered |
 | :--- | :---: | :--- |
@@ -446,11 +547,11 @@ The DittoDB test suite covers all requirements and canonical edge cases defined 
 | `BPlusTreeLeafPageTest` | 10 | Sorted (key, RID) array layout, next_page_id sequential linking, binary search lookup, sorted insert, duplicate rejection, split/merge helpers, custom comparators |
 | `GenericKeyTest` | 9 | GenericKey<N> layout, order-preserving integer/float/string serialization, memcmp-ready lexicographical encoding, GenericComparator, BPlusTreePageSizeEstimator capacity calculations, leaf/internal integration |
 | `BPlusTreeHeaderPageTest` | 5 | 4096-byte header layout, root page pointer persistence, crash/restart durability via BPM/DiskManager, tree depth & record accounting, isolated leaf & internal node transitions |
-| `BPlusTreeTest` | 23 | Empty tree insert, leaf with space insert, duplicate key rejection, leaf split with next-pointer chain & separator push-up, modular root split (`CreateNewRoot`), modular internal split (`Split(InternalPage*)` & reparenting), multi-level dynamic depth progression, small fanouts (3-4) ascending right-splits, descending left-splits, random multi-level splits, alternating ping-pong splits, structural invariant validator (`ValidateTree`), Graphviz DOT tree dump (`ToDot`, `DumpGraphviz`), root-to-leaf traversal, binary search GetValue, zero pin leaks, GenericKey, persistence, comprehensive fanout matrix fuzzing |
+| `BPlusTreeTest` | 65 | Empty tree insert, leaf with space insert, duplicate key rejection, leaf split with next-pointer chain & separator push-up, modular root split (`CreateNewRoot`), modular internal split (`Split(InternalPage*)` & reparenting), multi-level dynamic depth progression, small fanouts (3-4) ascending right-splits, descending left-splits, random multi-level splits, alternating ping-pong splits, structural invariant validator (`ValidateTree`), Graphviz DOT tree dump (`ToDot`, `DumpGraphviz`), root-to-leaf traversal, binary search GetValue, zero pin leaks, GenericKey, persistence, single-leaf/root removal, multi-level deletion without underflow, sibling borrowing redistribution (left & right), node coalesce/merge (left & right), cascaded root collapse to single child or empty, IndexIterator forward sequential traversal, lower-bound positioning (`Begin(key)`), RAII pin management, closed-interval range scanning (`RangeScan`), multi-fanout matrix stress workloads, comprehensive fuzzing |
 
 ```
-100% tests passed, 0 tests failed out of 267
-Total Test time (real) = 13.13 sec
+100% tests passed, 0 tests failed out of 309
+Total Test time (real) = 26.11 sec
 ```
 
 ### ThreadSanitizer & Helgrind Verification
@@ -502,9 +603,10 @@ ctest --test-dir build --output-on-failure
 
 ## Design Documents & Deep-Dives
 
-- 🗄️ [Slotted Page Storage Architecture & Postgres Comparison](docs/slotted_page_design.md)
-- 🧠 [LRU-K Replacer Design & Mathematical Formulation](docs/lru_k_design.md)
-- 💾 [Disk Manager Storage & Block Alignment](docs/disk_manager_design.md)
+- [B+ Tree Storage Architecture & Split/Merge Invariants](docs/b_plus_tree_design.md)
+- [Slotted Page Storage Architecture & Postgres Comparison](docs/slotted_page_design.md)
+- [LRU-K Replacer Design & Mathematical Formulation](docs/lru_k_design.md)
+- [Disk Manager Storage & Block Alignment](docs/disk_manager_design.md)
 
 ---
 

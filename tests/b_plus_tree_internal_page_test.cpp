@@ -274,9 +274,7 @@ TEST_F(BPlusTreeInternalPageTest, InPlacePageBufferTransmutation) {
 // ============================================================================
 TEST_F(BPlusTreeInternalPageTest, CustomComparatorSupport) {
     // Custom descending comparator
-    struct GreaterComp {
-        bool operator()(int a, int b) const { return a > b; }
-    };
+    using GreaterComp = std::greater<int>;
 
     using DescendingInternalPage = BPlusTreeInternalPage<int, page_id_t, GreaterComp>;
     DescendingInternalPage page;

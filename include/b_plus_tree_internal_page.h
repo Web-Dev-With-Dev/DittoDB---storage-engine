@@ -10,6 +10,8 @@
 #include "b_plus_tree_page.h"
 #include "generic_key.h"
 
+class BufferPoolManager;
+
 /**
  * @class BPlusTreeInternalPage
  * @brief Store n indexed keys and n+1 child pointers within a fixed 4096-byte Page buffer.
@@ -139,14 +141,7 @@ public:
      * @param value Child page ID to search for.
      * @return int Index if found, or -1 if not found.
      */
-    int ValueIndex(const ValueType &value) const {
-        for (int i = 0; i < GetSize(); ++i) {
-            if (array_[i].second == value) {
-                return i;
-            }
-        }
-        return -1;
-    }
+    int ValueIndex(const ValueType &value) const;
 
     // ==================== Binary-Search Child Lookup ====================
 
@@ -165,33 +160,7 @@ public:
      * @param comparator Optional custom comparator (defaults to KeyComparator{}).
      * @return ValueType Child page ID to descend into.
      */
-    ValueType Lookup(const KeyType &key, const KeyComparator &comparator = KeyComparator{}) const {
-        if (GetSize() <= 0) {
-            return static_cast<ValueType>(INVALID_PAGE_ID);
-        }
-        if (GetSize() == 1) {
-            return ValueAt(0);
-        }
-
-        int low = 1;
-        int high = GetSize() - 1;
-        int target_idx = 0; // Default to child pointer 0 if key < KeyAt(1)
-
-        while (low <= high) {
-            int mid = low + (high - low) / 2;
-            if (Compare(comparator, KeyAt(mid), key) <= 0) {
-                // KeyAt(mid) <= key: candidate child index found.
-                // Continue searching to the right to find any higher valid split key.
-                target_idx = mid;
-                low = mid + 1;
-            } else {
-                // KeyAt(mid) > key: search to the left.
-                high = mid - 1;
-            }
-        }
-
-        return ValueAt(target_idx);
-    }
+    ValueType Lookup(const KeyType &key, const KeyComparator &comparator = KeyComparator{}) const;
 
     // ==================== Insert-After Helper ====================
 
@@ -207,25 +176,7 @@ public:
      * @param new_value The new child page ID to insert.
      * @return int The updated size of the node, or -1 if old_value was not found.
      */
-    int InsertNodeAfter(const ValueType &old_value, const KeyType &new_key, const ValueType &new_value) {
-        int index = ValueIndex(old_value);
-        if (index == -1) {
-            return -1;
-        }
-
-        int current_size = GetSize();
-        assert(current_size < GetMaxSize());
-
-        // Shift entries right to create space at index + 1
-        for (int i = current_size; i > index + 1; --i) {
-            array_[i] = array_[i - 1];
-        }
-
-        array_[index + 1].first = new_key;
-        array_[index + 1].second = new_value;
-        IncreaseSize(1);
-        return GetSize();
-    }
+    int InsertNodeAfter(const ValueType &old_value, const KeyType &new_key, const ValueType &new_value);
 
     // ==================== Node Management Helpers ====================
 
@@ -235,24 +186,13 @@ public:
      * @param key1 Separator key.
      * @param value1 Pointer to right child.
      */
-    void Populate(const ValueType &value0, const KeyType &key1, const ValueType &value1) {
-        SetValueAt(0, value0);
-        SetKeyAt(1, key1);
-        SetValueAt(1, value1);
-        SetSize(2);
-    }
+    void Populate(const ValueType &value0, const KeyType &key1, const ValueType &value1);
 
     /**
      * @brief Remove an entry at a given index and shift remaining entries left.
      * @param index Index to remove.
      */
-    void Remove(int index) {
-        assert(index >= 0 && index < GetSize());
-        for (int i = index; i < GetSize() - 1; ++i) {
-            array_[i] = array_[i + 1];
-        }
-        IncreaseSize(-1);
-    }
+    void Remove(int index);
 
     /**
      * @brief Return a const pointer to the internal entry array.
@@ -274,37 +214,10 @@ public:
      * - recipient->array_[1 .. move_count - 1] get array_[move_start + 1 .. n - 1].
      * - If buffer pool manager is provided, reparents all moved children to recipient->GetPageId().
      *
-     * @tparam BPM Buffer pool manager type (templated to avoid circular header dependencies).
      * @param recipient Target sibling internal page.
      * @param bpm Optional BufferPoolManager to update parent pointers of all moved child pages.
      */
-    template <typename BPM = void>
-    void MoveHalfTo(BPlusTreeInternalPage *recipient, BPM *bpm = nullptr) {
-        assert(recipient != nullptr);
-        int total_size = GetSize();
-        int move_start = total_size / 2;
-        int move_count = total_size - move_start;
-
-        for (int i = 0; i < move_count; ++i) {
-            recipient->array_[i] = array_[move_start + i];
-        }
-
-        recipient->SetSize(move_count);
-        SetSize(move_start);
-
-        if constexpr (!std::is_same_v<BPM, void>) {
-            if (bpm != nullptr) {
-                for (int i = 0; i < move_count; ++i) {
-                    page_id_t child_pid = recipient->ValueAt(i);
-                    auto *child_frame = bpm->FetchPage(child_pid);
-                    if (child_frame != nullptr) {
-                        BPlusTreePage::Cast(child_frame)->SetParentPageId(recipient->GetPageId());
-                        bpm->UnpinPage(child_pid, true);
-                    }
-                }
-            }
-        }
-    }
+    void MoveHalfTo(BPlusTreeInternalPage *recipient, BufferPoolManager *bpm = nullptr);
 
     /**
      * @brief Move all entries from this node into recipient during internal node merge.
@@ -317,42 +230,11 @@ public:
      * - If bpm is provided, all moved children are reparented to recipient->GetPageId().
      * - This node size is reset to 0.
      *
-     * @tparam BPM Buffer pool manager type.
      * @param recipient Target left sibling internal page.
      * @param middle_key Separator key pulled down from parent.
      * @param bpm Optional BufferPoolManager to update parent pointers of all moved child pages.
      */
-    template <typename BPM = void>
-    void MoveAllTo(BPlusTreeInternalPage *recipient, const KeyType &middle_key, BPM *bpm = nullptr) {
-        assert(recipient != nullptr);
-        int target_start = recipient->GetSize();
-        int move_count = GetSize();
-
-        // 1. First moved entry takes middle_key from parent and array_[0].second as child
-        recipient->array_[target_start] = {middle_key, array_[0].second};
-
-        // 2. Remaining entries copied directly
-        for (int i = 1; i < move_count; ++i) {
-            recipient->array_[target_start + i] = array_[i];
-        }
-
-        recipient->IncreaseSize(move_count);
-        SetSize(0);
-
-        // 3. Reparent all moved children to recipient
-        if constexpr (!std::is_same_v<BPM, void>) {
-            if (bpm != nullptr) {
-                for (int i = 0; i < move_count; ++i) {
-                    page_id_t child_pid = recipient->ValueAt(target_start + i);
-                    auto *child_frame = bpm->FetchPage(child_pid);
-                    if (child_frame != nullptr) {
-                        BPlusTreePage::Cast(child_frame)->SetParentPageId(recipient->GetPageId());
-                        bpm->UnpinPage(child_pid, true);
-                    }
-                }
-            }
-        }
-    }
+    void MoveAllTo(BPlusTreeInternalPage *recipient, const KeyType &middle_key, BufferPoolManager *bpm = nullptr);
 
     /**
      * @brief Move last entry from this node to front of recipient (redistribution from left sibling).
@@ -365,37 +247,11 @@ public:
      * - The borrowed child is reparented to recipient->GetPageId().
      * - This node size decreases by 1.
      *
-     * @tparam BPM Buffer pool manager type.
      * @param recipient Right sibling internal page (underflowing).
      * @param middle_key Separator key pulled down from parent.
      * @param bpm Optional BufferPoolManager to update parent pointer of the moved child.
      */
-    template <typename BPM = void>
-    void MoveLastToFrontOf(BPlusTreeInternalPage *recipient, const KeyType &middle_key, BPM *bpm = nullptr) {
-        assert(recipient != nullptr);
-        assert(GetSize() > 0);
-
-        int rec_size = recipient->GetSize();
-        for (int i = rec_size; i > 0; --i) {
-            recipient->array_[i] = recipient->array_[i - 1];
-        }
-
-        recipient->array_[1].first = middle_key;
-        page_id_t borrowed_child_pid = ValueAt(GetSize() - 1);
-        recipient->array_[0].second = borrowed_child_pid;
-        recipient->IncreaseSize(1);
-        IncreaseSize(-1);
-
-        if constexpr (!std::is_same_v<BPM, void>) {
-            if (bpm != nullptr) {
-                auto *child_frame = bpm->FetchPage(borrowed_child_pid);
-                if (child_frame != nullptr) {
-                    BPlusTreePage::Cast(child_frame)->SetParentPageId(recipient->GetPageId());
-                    bpm->UnpinPage(borrowed_child_pid, true);
-                }
-            }
-        }
-    }
+    void MoveLastToFrontOf(BPlusTreeInternalPage *recipient, const KeyType &middle_key, BufferPoolManager *bpm = nullptr);
 
     /**
      * @brief Move first entry from this node to end of recipient (redistribution from right sibling).
@@ -409,38 +265,11 @@ public:
      *   array_[1 .. size - 2] get array_[2 .. size - 1].
      * - This node size decreases by 1.
      *
-     * @tparam BPM Buffer pool manager type.
      * @param recipient Left sibling internal page (underflowing).
      * @param middle_key Separator key pulled down from parent.
      * @param bpm Optional BufferPoolManager to update parent pointer of the moved child.
      */
-    template <typename BPM = void>
-    void MoveFirstToEndOf(BPlusTreeInternalPage *recipient, const KeyType &middle_key, BPM *bpm = nullptr) {
-        assert(recipient != nullptr);
-        assert(GetSize() > 0);
-
-        int rec_size = recipient->GetSize();
-        page_id_t borrowed_child_pid = ValueAt(0);
-        recipient->array_[rec_size] = {middle_key, borrowed_child_pid};
-        recipient->IncreaseSize(1);
-
-        // Shift remaining entries left in this node
-        array_[0].second = ValueAt(1);
-        for (int i = 1; i < GetSize() - 1; ++i) {
-            array_[i] = array_[i + 1];
-        }
-        IncreaseSize(-1);
-
-        if constexpr (!std::is_same_v<BPM, void>) {
-            if (bpm != nullptr) {
-                auto *child_frame = bpm->FetchPage(borrowed_child_pid);
-                if (child_frame != nullptr) {
-                    BPlusTreePage::Cast(child_frame)->SetParentPageId(recipient->GetPageId());
-                    bpm->UnpinPage(borrowed_child_pid, true);
-                }
-            }
-        }
-    }
+    void MoveFirstToEndOf(BPlusTreeInternalPage *recipient, const KeyType &middle_key, BufferPoolManager *bpm = nullptr);
 
 private:
     /**
