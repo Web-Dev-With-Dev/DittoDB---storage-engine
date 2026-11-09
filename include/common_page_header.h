@@ -88,3 +88,4 @@ private:
 
 static_assert(sizeof(CommonPageHeader) == 24, "CommonPageHeader must be exactly 24 bytes in size");
 static_assert(std::is_standard_layout_v<CommonPageHeader>, "CommonPageHeader must satisfy standard layout for direct disk casting");
+
