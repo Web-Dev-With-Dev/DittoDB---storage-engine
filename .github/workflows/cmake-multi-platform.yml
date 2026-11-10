@@ -15,8 +15,8 @@ jobs:
       matrix:
         include:
           - name: Linux GCC (C++20)
-            c_compiler: gcc-13
-            cpp_compiler: g++-13
+            c_compiler: gcc-14
+            cpp_compiler: g++-14
           - name: Linux Clang (C++20)
             c_compiler: clang-17
             cpp_compiler: clang++-17
@@ -100,6 +100,9 @@ jobs:
 
       - name: Build Targets under TSan
         run: cmake --build build-tsan
+
+      - name: Reduce ASLR entropy for TSan compatibility
+        run: sudo sysctl vm.mmap_rnd_bits=28
 
       - name: Run All Tests under ThreadSanitizer (TSan)
         run: ctest --test-dir build-tsan --output-on-failure --verbose
