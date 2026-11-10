@@ -1,44 +1,80 @@
 #include "disk_manager.h"
 
 #include <cstring>
-#include <stdexcept>
-#include <mutex>
-#include <unordered_map>
+#include <filesystem>
 #include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <unordered_map>
 
-// File-path-keyed mutex registry.
-// All DiskManager instances that open the same file path share one mutex,
-// so their seek+read/write sequences are correctly serialized.
-// Different files remain fully independent.
 namespace {
 
-std::mutex registry_mutex_;
-std::unordered_map<std::string, std::weak_ptr<std::mutex>> file_mutexes_;
+std::string CanonicalizePath(const std::string &path)
+{
+    std::error_code ec;
+    std::filesystem::path abs_path = std::filesystem::absolute(std::filesystem::path(path), ec);
+    if (ec)
+    {
+        return path;
+    }
 
-std::shared_ptr<std::mutex> GetFileMutex(const std::string& path) {
-    std::lock_guard<std::mutex> reg_lock(registry_mutex_);
-    for (auto it = file_mutexes_.begin(); it != file_mutexes_.end(); ) {
-        if (it->second.expired()) {
-            it = file_mutexes_.erase(it);
-        } else {
+    std::filesystem::path canon = std::filesystem::weakly_canonical(abs_path, ec);
+    if (ec)
+    {
+        return abs_path.lexically_normal().string();
+    }
+
+    return canon.lexically_normal().string();
+}
+
+}  // namespace
+
+struct DiskManager::FileState {
+    std::mutex mutex;
+    page_id_t next_page_id{0};
+    bool initialized{false};
+};
+
+// File-path-keyed state registry.
+// All DiskManager instances that open the same canonical file path share one FileState,
+// so their I/O sequences and page allocation cursors stay synchronized.
+// Different files remain completely independent.
+std::shared_ptr<DiskManager::FileState> DiskManager::GetFileState(const std::string &file_name)
+{
+    static std::mutex registry_mutex;
+    static std::unordered_map<std::string, std::weak_ptr<FileState>> file_states;
+
+    const std::string key = CanonicalizePath(file_name);
+
+    std::lock_guard<std::mutex> reg_lock(registry_mutex);
+    for (auto it = file_states.begin(); it != file_states.end(); )
+    {
+        if (it->second.expired())
+        {
+            it = file_states.erase(it);
+        }
+        else
+        {
             ++it;
         }
     }
-    auto& weak = file_mutexes_[path];
+
+    auto &weak = file_states[key];
     auto shared = weak.lock();
-    if (!shared) {
-        shared = std::make_shared<std::mutex>();
+    if (!shared)
+    {
+        shared = std::make_shared<FileState>();
         weak = shared;
     }
     return shared;
 }
 
-}  // namespace
-
 DiskManager::DiskManager(const std::string &file_name)
-    : file_name_(file_name), next_page_id_(0),
-      file_mutex_(GetFileMutex(file_name))
+    : file_name_(file_name),
+      file_state_(GetFileState(file_name))
 {
+    std::lock_guard<std::mutex> lock(file_state_->mutex);
+
     db_file_.open(file_name,
                   std::ios::binary |
                   std::ios::in |
@@ -80,25 +116,37 @@ DiskManager::DiskManager(const std::string &file_name)
         throw std::runtime_error("Database file is corrupted.");
     }
 
-    next_page_id_ = static_cast<page_id_t>(size / PAGE_SIZE);
+    if (!file_state_->initialized)
+    {
+        file_state_->next_page_id = static_cast<page_id_t>(size / PAGE_SIZE);
+        file_state_->initialized = true;
+    }
 }
 
 page_id_t DiskManager::AllocatePage()
 {
-    std::lock_guard<std::mutex> lock(*file_mutex_);
-    return next_page_id_++;
+    std::lock_guard<std::mutex> lock(file_state_->mutex);
+    return file_state_->next_page_id++;
 }
 
 page_id_t DiskManager::GetNextPageId() const
 {
-    std::lock_guard<std::mutex> lock(*file_mutex_);
-    return next_page_id_;
+    std::lock_guard<std::mutex> lock(file_state_->mutex);
+    return file_state_->next_page_id;
 }
 
 void DiskManager::WritePage(page_id_t page_id, const char *data)
 {
+    if (page_id < 0)
+    {
+        throw std::invalid_argument("WritePage: invalid negative page_id.");
+    }
+    if (data == nullptr)
+    {
+        throw std::invalid_argument("WritePage: data buffer cannot be nullptr.");
+    }
 
-     std::lock_guard<std::mutex> lock(*file_mutex_);
+    std::lock_guard<std::mutex> lock(file_state_->mutex);
 
     const size_t offset = static_cast<size_t>(page_id) * PAGE_SIZE;
 
@@ -163,8 +211,16 @@ void DiskManager::WritePage(page_id_t page_id, const char *data)
 
 void DiskManager::ReadPage(page_id_t page_id, char *buffer)
 {
+    if (page_id < 0)
+    {
+        throw std::invalid_argument("ReadPage: invalid negative page_id.");
+    }
+    if (buffer == nullptr)
+    {
+        throw std::invalid_argument("ReadPage: destination buffer cannot be nullptr.");
+    }
 
-    std::lock_guard<std::mutex> guard(*file_mutex_);
+    std::lock_guard<std::mutex> guard(file_state_->mutex);
 
     std::memset(buffer, 0, PAGE_SIZE);
 
@@ -193,9 +249,9 @@ void DiskManager::ReadPage(page_id_t page_id, char *buffer)
 
 DiskManager::~DiskManager()
 {
-    if (file_mutex_)
+    if (file_state_)
     {
-        std::lock_guard<std::mutex> guard(*file_mutex_);
+        std::lock_guard<std::mutex> guard(file_state_->mutex);
         if (db_file_.is_open())
         {
             db_file_.close();

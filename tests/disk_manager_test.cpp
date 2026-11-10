@@ -935,3 +935,49 @@ TEST_F(DiskManagerTest, ExtremeStressTest) {
         }
     }
 }
+
+
+// Test 41: Shared next_page_id across multiple DiskManager instances on the same file
+TEST_F(DiskManagerTest, SharedNextPageIdAcrossInstances) {
+    const std::string other_file = "test_other.db";
+    if (std::filesystem::exists(other_file)) {
+        std::filesystem::remove(other_file);
+    }
+
+    {
+        DiskManager dm1(filename);
+        DiskManager dm2("./" + filename);
+        DiskManager dm_other(other_file);
+
+        EXPECT_EQ(dm1.GetNextPageId(), 0);
+        EXPECT_EQ(dm2.GetNextPageId(), 0);
+        EXPECT_EQ(dm_other.GetNextPageId(), 0);
+
+        // Allocation in dm1 should advance dm2's view of the same file, not dm_other
+        EXPECT_EQ(dm1.AllocatePage(), 0);
+        EXPECT_EQ(dm1.GetNextPageId(), 1);
+        EXPECT_EQ(dm2.GetNextPageId(), 1);
+        EXPECT_EQ(dm_other.GetNextPageId(), 0);
+
+        // Allocation in dm2 should continue sequentially from 1
+        EXPECT_EQ(dm2.AllocatePage(), 1);
+        EXPECT_EQ(dm1.GetNextPageId(), 2);
+        EXPECT_EQ(dm2.GetNextPageId(), 2);
+        EXPECT_EQ(dm_other.AllocatePage(), 0);
+    }
+
+    if (std::filesystem::exists(other_file)) {
+        std::filesystem::remove(other_file);
+    }
+}
+
+// Test 42: Invalid negative page_id and nullptr buffers throw std::invalid_argument
+TEST_F(DiskManagerTest, InvalidArgumentsThrow) {
+    DiskManager disk(filename);
+    char buffer[PAGE_SIZE] = {};
+
+    EXPECT_THROW(disk.WritePage(INVALID_PAGE_ID, buffer), std::invalid_argument);
+    EXPECT_THROW(disk.ReadPage(INVALID_PAGE_ID, buffer), std::invalid_argument);
+    EXPECT_THROW(disk.WritePage(0, nullptr), std::invalid_argument);
+    EXPECT_THROW(disk.ReadPage(0, nullptr), std::invalid_argument);
+}

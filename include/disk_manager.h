@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <fstream>
 #include <memory>
-#include <mutex>
 #include <string>
 
 #include "config.h"
@@ -17,15 +16,18 @@
  * - Allocates new physical pages sequentially on disk.
  * - Reads pages from disk storage into raw in-memory buffers (4096-byte blocks).
  * - Writes pages from in-memory buffers to disk storage.
- * - Synchronizes concurrent I/O access to the same physical file via a shared mutex registry.
+ * - Synchronizes concurrent I/O and page allocation per database file via a shared state registry.
  */
 class DiskManager {
 private:
+    /// Per-file shared state (mutex + next_page_id) shared across all instances pointing to the same file
+    struct FileState;
+
+    static std::shared_ptr<FileState> GetFileState(const std::string &file_name);
+
     std::fstream db_file_;
     std::string file_name_;
-    page_id_t next_page_id_;
-    /// Shared mutex keyed by file path — instances on the same file serialize I/O
-    std::shared_ptr<std::mutex> file_mutex_;
+    std::shared_ptr<FileState> file_state_;
     std::atomic<size_t> num_reads_{0};
     std::atomic<size_t> num_writes_{0};
 
@@ -33,12 +35,16 @@ public:
     /**
      * @brief Construct a new DiskManager for a specified database file path.
      * Opens existing file or creates a new one if it does not exist.
-     * Computes the initial page allocation cursor based on current file size.
+     * Initializes the shared per-file page allocation cursor based on current file size
+     * if this is the first active instance for the file.
      * @param file_name Path to the database file on disk.
      * @throws std::runtime_error If file creation, opening, or size determination fails,
      *                            or if file size is not a multiple of PAGE_SIZE.
      */
     explicit DiskManager(const std::string &file_name);
+
+    DiskManager(const DiskManager &) = delete;
+    DiskManager &operator=(const DiskManager &) = delete;
 
     /**
      * @brief Allocate a new sequential page on disk.
@@ -94,4 +100,4 @@ public:
      * @brief Close the underlying database file stream safely.
      */
     ~DiskManager();
-};
+};
