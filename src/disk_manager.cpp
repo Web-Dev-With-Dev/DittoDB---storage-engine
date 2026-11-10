@@ -1,7 +1,9 @@
 #include "disk_manager.h"
 
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -219,12 +221,17 @@ void DiskManager::ReadPage(page_id_t page_id, char *buffer)
     {
         throw std::invalid_argument("ReadPage: destination buffer cannot be nullptr.");
     }
+    if (static_cast<uint64_t>(page_id) > static_cast<uint64_t>(std::numeric_limits<std::streamoff>::max()) / PAGE_SIZE ||
+        static_cast<size_t>(page_id) > std::numeric_limits<size_t>::max() / PAGE_SIZE)
+    {
+        throw std::overflow_error("ReadPage: page offset overflows representable file offset.");
+    }
+
+    const std::streamoff offset = static_cast<std::streamoff>(static_cast<size_t>(page_id) * PAGE_SIZE);
 
     std::lock_guard<std::mutex> guard(file_state_->mutex);
 
     std::memset(buffer, 0, PAGE_SIZE);
-
-    size_t offset = static_cast<size_t>(page_id) * PAGE_SIZE;
 
     db_file_.seekg(offset);
 
@@ -235,12 +242,15 @@ void DiskManager::ReadPage(page_id_t page_id, char *buffer)
 
     db_file_.read(buffer, PAGE_SIZE);
 
+    if (db_file_.bad())
+    {
+        throw std::runtime_error("I/O error while reading page.");
+    }
+
     std::streamsize bytes_read = db_file_.gcount();
 
     if (bytes_read < static_cast<std::streamsize>(PAGE_SIZE))
     {
-        std::memset(buffer + bytes_read, 0, PAGE_SIZE - bytes_read);
-
         db_file_.clear();
     }
 
