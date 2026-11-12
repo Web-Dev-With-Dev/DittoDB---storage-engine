@@ -54,6 +54,14 @@ public:
     page_id_t AllocatePage();
 
     /**
+     * @brief Deallocate a page on disk.
+     * In an append-only/page-slotted storage architecture, this acts as a logical deallocation hook
+     * (or placeholder for physical free-list/bitmap reclaiming).
+     * @param page_id Logical page ID to deallocate.
+     */
+    void DeallocatePage(page_id_t page_id);
+
+    /**
      * @brief Non-mutating peek at the next page ID to be allocated.
      * @return The next available page ID without incrementing the cursor.
      */

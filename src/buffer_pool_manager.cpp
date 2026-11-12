@@ -326,9 +326,9 @@ bool BufferPoolManager::DeletePage(page_id_t page_id) {
         return false;
     }
 
-    // Stop tracking in page_table_ and replacer
+    // Stop tracking in page_table_ and remove completely from replacer
     page_table_.erase(it);
-    replacer_->SetEvictable(frame_id, false);
+    replacer_->Remove(frame_id);
 
     // Reset frame state
     page.SetPageId(INVALID_PAGE_ID);
@@ -336,6 +336,10 @@ bool BufferPoolManager::DeletePage(page_id_t page_id) {
     std::memset(page.GetData(), 0, PAGE_SIZE);
 
     free_list_.push_back(frame_id);
+
+    if (disk_manager_ != nullptr) {
+        disk_manager_->DeallocatePage(page_id);
+    }
     return true;
 }
 

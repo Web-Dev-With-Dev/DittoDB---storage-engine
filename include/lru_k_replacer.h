@@ -77,6 +77,13 @@ public:
     void SetEvictable(frame_id_t frame_id, bool evictable);
 
     /**
+     * @brief Remove an evictable frame from the replacer and clear its access history.
+     * Only evictable frames can be removed. If the frame is non-evictable or doesn't exist, this is a no-op.
+     * @param frame_id Frame index to remove.
+     */
+    void Remove(frame_id_t frame_id);
+
+    /**
      * @brief Get the total number of currently evictable frames across both queues.
      * @return Number of evictable frames.
      */

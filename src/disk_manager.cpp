@@ -131,6 +131,12 @@ page_id_t DiskManager::AllocatePage()
     return file_state_->next_page_id++;
 }
 
+void DiskManager::DeallocatePage(page_id_t page_id)
+{
+    // Logical deallocation placeholder; reserved for future free-list/bitmap reclaiming.
+    (void)page_id;
+}
+
 page_id_t DiskManager::GetNextPageId() const
 {
     std::lock_guard<std::mutex> lock(file_state_->mutex);

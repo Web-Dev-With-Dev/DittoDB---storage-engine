@@ -134,6 +134,26 @@ void LRUKReplacer::SetEvictable(size_t frame_id, bool evictable) {
     }
 }
 
+void LRUKReplacer::Remove(size_t frame_id) {
+    std::lock_guard<std::mutex> lock(replacer_latch_);
+    if (frame_id >= total_frames_) {
+        return;
+    }
+
+    FrameInfo& info = frame_info_[frame_id];
+    // Per CMU 15-445 specification: only evictable frames can be removed.
+    // If the frame is non-evictable or not found, it is a no-op.
+    if (!info.is_evictable) {
+        return;
+    }
+
+    RemoveFromQueue(frame_id);
+    info.access_history.clear();
+    info.access_count = 0;
+    info.is_evictable = false;
+    info.is_pinned = false;
+}
+
 size_t LRUKReplacer::GetEvictableCount() const {
     std::lock_guard<std::mutex> lock(replacer_latch_);
     return cold_queue_.size() + hot_queue_.size();
