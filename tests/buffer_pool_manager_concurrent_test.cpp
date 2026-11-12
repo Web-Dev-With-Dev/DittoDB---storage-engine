@@ -525,6 +525,7 @@ TEST_F(BufferPoolManagerConcurrentTest, MixedConcurrentLifecycleStress) {
     StopSignal stop_signal;
     const size_t total_workers = 9;
     std::vector<int> worker_ops(total_workers, 0);
+    std::atomic<int> total_ops_counter{0};
 
     // Reader workers (4 threads: 0-3)
     auto reader_task = [&](int id) {
@@ -543,6 +544,7 @@ TEST_F(BufferPoolManagerConcurrentTest, MixedConcurrentLifecycleStress) {
                 bpm.UnpinPage(pid, false);
             }
             ++ops;
+            total_ops_counter.fetch_add(1, std::memory_order_relaxed);
             std::this_thread::yield();
         }
         worker_ops[id] = ops;
@@ -564,6 +566,7 @@ TEST_F(BufferPoolManagerConcurrentTest, MixedConcurrentLifecycleStress) {
                 bpm.UnpinPage(pid, true);
             }
             ++ops;
+            total_ops_counter.fetch_add(1, std::memory_order_relaxed);
             std::this_thread::yield();
         }
         worker_ops[4 + id] = ops;
@@ -575,6 +578,7 @@ TEST_F(BufferPoolManagerConcurrentTest, MixedConcurrentLifecycleStress) {
         while (!stop_signal.ShouldStop()) {
             bpm.FlushAllPages();
             ++ops;
+            total_ops_counter.fetch_add(1, std::memory_order_relaxed);
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
         worker_ops[8] = ops;
@@ -586,8 +590,13 @@ TEST_F(BufferPoolManagerConcurrentTest, MixedConcurrentLifecycleStress) {
     for (int i = 0; i < 4; ++i) workers.emplace_back(writer_task, i);
     workers.emplace_back(flusher_task);
 
-    // Let them run for 300ms of intensive stress
+    // Let them run for at least 300ms and at least 500 ops (handles slower instrumentation like Helgrind/TSan)
+    const auto start = std::chrono::steady_clock::now();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    while (total_ops_counter.load(std::memory_order_relaxed) <= 500 &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(10)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     stop_signal.SetStop();
 
     for (auto &w : workers) {
