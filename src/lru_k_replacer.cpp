@@ -1,7 +1,5 @@
 #include "lru_k_replacer.h"
 #include <stdexcept>
-#include <algorithm>
-#include <limits>
 
 LRUKReplacer::LRUKReplacer(size_t num_frames, size_t k)
     : total_frames_(num_frames), k_(k), current_time_(0), eviction_count_(0) {
@@ -62,6 +60,10 @@ void LRUKReplacer::Unpin(size_t frame_id) {
     }
     
     FrameInfo& info = frame_info_[frame_id];
+    if (!info.is_pinned) {
+        return;
+    }
+
     info.is_pinned = false;
     // Only mark evictable (and queue) if the frame has been accessed at least once.
     // A never-accessed frame has no meaningful LRU-K history to evict by.
