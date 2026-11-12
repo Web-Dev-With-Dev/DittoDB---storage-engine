@@ -35,7 +35,6 @@ void LRUKReplacer::RecordAccess(size_t frame_id) {
     }
     
     if (info.is_evictable && !info.is_pinned) {
-        RemoveFromQueue(frame_id);
         AddToQueue(frame_id);
     }
 }
@@ -200,28 +199,27 @@ void LRUKReplacer::AddToQueue(size_t frame_id) {
     
     RemoveFromQueue(frame_id);
     
-    if (info.access_count < k_) {
-        cold_queue_.push_back(frame_id);
-        auto it = cold_queue_.end();
-        --it;
-        position_in_cold_[frame_id] = it;
-    } else {
-        size_t kth_access = GetKthAccessTime(frame_id);
-        
-        auto insert_pos = hot_queue_.end();
-        for (auto it = hot_queue_.begin(); it != hot_queue_.end(); ++it) {
-            const FrameInfo& other = frame_info_[*it];
-            if (other.access_count >= k_) {
-                size_t other_kth = GetKthAccessTime(*it);
-                if (other_kth > kth_access) {
+    auto insert_sorted = [&](std::list<int>& queue,
+                             std::unordered_map<int, std::list<int>::iterator>& pos_map) {
+        const size_t target_ts = GetKthAccessTime(frame_id);
+        auto insert_pos = queue.end();
+        // Fast path: sequential appends belong at the back
+        if (!queue.empty() && GetKthAccessTime(queue.back()) > target_ts) {
+            for (auto it = queue.begin(); it != queue.end(); ++it) {
+                if (GetKthAccessTime(*it) > target_ts) {
                     insert_pos = it;
                     break;
                 }
             }
         }
-        
-        auto inserted_it = hot_queue_.insert(insert_pos, frame_id);
-        position_in_hot_[frame_id] = inserted_it;
+        auto inserted_it = queue.insert(insert_pos, static_cast<int>(frame_id));
+        pos_map[static_cast<int>(frame_id)] = inserted_it;
+    };
+
+    if (info.access_count < k_) {
+        insert_sorted(cold_queue_, position_in_cold_);
+    } else {
+        insert_sorted(hot_queue_, position_in_hot_);
     }
 }
 
