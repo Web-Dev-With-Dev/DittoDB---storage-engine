@@ -76,13 +76,18 @@ void Page::SetDirty(bool dirty)
 
 void Page::Pin()
 {
-    ++pin_count_;
+    pin_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void Page::Unpin()
 {
-    int current = pin_count_.load();
-    while (current > 0 && !pin_count_.compare_exchange_weak(current, current - 1))
+    int current = pin_count_.load(std::memory_order_relaxed);
+
+    while (current > 0 &&
+           !pin_count_.compare_exchange_weak(
+               current,
+               current - 1,
+               std::memory_order_relaxed))
     {
     }
 }
