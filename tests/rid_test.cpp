@@ -157,3 +157,17 @@ TEST_F(RIDTest, StreamOutput) {
     ss << rid;
     EXPECT_EQ(ss.str(), "[77, 3]");
 }
+
+TEST_F(RIDTest, EncodingBoundaryValues) {
+    RID rid1(-1, 0);
+    RID rid2(INT32_MAX, UINT32_MAX);
+    RID rid3(0, UINT32_MAX);
+    RID rid4(INT32_MIN, 0);
+
+    EXPECT_EQ(RID(rid1.Get()), rid1);
+    EXPECT_EQ(RID(rid2.Get()), rid2);
+    EXPECT_EQ(RID(rid3.Get()), rid3);
+    EXPECT_EQ(RID(rid4.Get()), rid4);
+    EXPECT_NE(rid1.Get(), rid2.Get());
+    EXPECT_NE(rid1.Get(), rid3.Get());
+}
