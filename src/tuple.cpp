@@ -1,3 +1,4 @@
+#include <cstring>
 #include "tuple.h"
 
 Tuple::Tuple(RID rid) : rid_(rid) {}
