@@ -75,6 +75,9 @@ void TablePage::SetFreeSpacePointer(uint32_t free_space_pointer) {
 }
 
 void TablePage::SetFreeSpacePointer(char *data, uint32_t free_space_pointer) {
+    if (free_space_pointer > PAGE_SIZE || free_space_pointer < SIZE_TABLE_PAGE_HEADER) {
+        return;
+    }
     *reinterpret_cast<uint32_t *>(data + OFFSET_FREE_SPACE) = free_space_pointer;
 }
 
@@ -213,10 +216,11 @@ bool TablePage::InsertTuple(const Tuple &tuple, RID *rid) {
 }
 
 bool TablePage::InsertTuple(std::span<const char> tuple_bytes, RID *rid) {
-    const uint32_t tuple_len = static_cast<uint32_t>(tuple_bytes.size());
-    if (tuple_len == 0 || tuple_len > PAGE_SIZE - SIZE_TABLE_PAGE_HEADER - SIZEOF_TUPLE_SLOT) {
+    constexpr size_t MAX_TUPLE_BYTES = PAGE_SIZE - SIZE_TABLE_PAGE_HEADER - SIZEOF_TUPLE_SLOT;
+    if (tuple_bytes.empty() || tuple_bytes.size() > MAX_TUPLE_BYTES) {
         return false;
     }
+    const uint32_t tuple_len = static_cast<uint32_t>(tuple_bytes.size());
 
     uint32_t num_tuples = GetNumTuples();
 
@@ -284,6 +288,11 @@ bool TablePage::InsertTuple(std::span<const char> tuple_bytes, RID *rid) {
 
     // Allocate tuple at bottom of free space
     uint32_t free_ptr = GetFreeSpacePointer();
+    uint32_t target_num_tuples = reuse_slot ? num_tuples : (num_tuples + 1);
+    uint32_t slot_array_end = static_cast<uint32_t>(SIZE_TABLE_PAGE_HEADER + target_num_tuples * SIZEOF_TUPLE_SLOT);
+    if (free_ptr < tuple_len || free_ptr - tuple_len < slot_array_end) {
+        return false;
+    }
     free_ptr -= tuple_len;
     SetFreeSpacePointer(free_ptr);
 
@@ -416,7 +425,12 @@ bool TablePage::UpdateTuple(const Tuple &new_tuple, Tuple *old_tuple, const RID 
         return true;
     }
 
+    // Allocate tuple at bottom of free space
     uint32_t free_ptr = GetFreeSpacePointer();
+    uint32_t slot_array_end = static_cast<uint32_t>(SIZE_TABLE_PAGE_HEADER + GetNumTuples() * SIZEOF_TUPLE_SLOT);
+    if (free_ptr < new_len || free_ptr - new_len < slot_array_end) {
+        return false;
+    }
     free_ptr -= new_len;
     SetFreeSpacePointer(free_ptr);
 
