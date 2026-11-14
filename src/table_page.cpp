@@ -530,18 +530,24 @@ void TablePage::Defragment(char *data) {
     uint32_t num_tuples = GetNumTuples(data);
     char temp[PAGE_SIZE];
     uint32_t new_free_ptr = static_cast<uint32_t>(PAGE_SIZE);
+    const uint32_t slot_array_end = static_cast<uint32_t>(SIZE_TABLE_PAGE_HEADER + num_tuples * SIZEOF_TUPLE_SLOT);
 
     for (uint32_t i = 0; i < num_tuples; ++i) {
         if (!IsTupleDeleted(data, i) && GetTupleSize(data, i) > 0 && GetTupleOffset(data, i) > 0) {
             uint32_t size = GetTupleSize(data, i);
             uint32_t old_offset = GetTupleOffset(data, i);
+
+            // Boundary validation: prevent tuple data from overlapping the slot metadata array
+            if (new_free_ptr < size || (new_free_ptr - size) < slot_array_end) {
+                break;
+            }
             new_free_ptr -= size;
 
             std::memcpy(temp + new_free_ptr, data + old_offset, size);
             SetTupleOffset(data, i, new_free_ptr);
         } else {
             SetTupleOffset(data, i, 0);
-            SetTupleSize(data, i, 0);
+            SetTupleSize(data, i, 0); // Explicitly writes raw 0, clearing DELETE_MASK
         }
     }
 
