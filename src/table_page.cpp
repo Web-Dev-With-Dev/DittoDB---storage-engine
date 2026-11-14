@@ -498,7 +498,7 @@ bool TablePage::RollbackDelete(const RID &rid) {
 bool TablePage::GetFirstTupleRid(RID *first_rid) const {
     uint32_t num = GetNumTuples();
     for (uint32_t i = 0; i < num; ++i) {
-        if (!IsTupleDeleted(i) && GetTupleSize(i) > 0) {
+        if (!IsTupleDeleted(i) && GetTupleSize(i) > 0 && GetTupleOffset(i) > 0) {
             if (first_rid != nullptr) {
                 first_rid->Set(GetTablePageId(), i);
             }
@@ -511,7 +511,7 @@ bool TablePage::GetFirstTupleRid(RID *first_rid) const {
 bool TablePage::GetNextTupleRid(const RID &cur_rid, RID *next_rid) const {
     uint32_t num = GetNumTuples();
     for (uint32_t i = cur_rid.GetSlotNum() + 1; i < num; ++i) {
-        if (!IsTupleDeleted(i) && GetTupleSize(i) > 0) {
+        if (!IsTupleDeleted(i) && GetTupleSize(i) > 0 && GetTupleOffset(i) > 0) {
             if (next_rid != nullptr) {
                 next_rid->Set(GetTablePageId(), i);
             }
@@ -592,7 +592,7 @@ void TablePageIterator::AdvanceToNextLiveSlot() {
 
     uint32_t num_tuples = page_->GetNumTuples();
     while (slot_id_ < num_tuples) {
-        if (!page_->IsTupleDeleted(slot_id_) && page_->GetTupleSize(slot_id_) > 0) {
+        if (!page_->IsTupleDeleted(slot_id_) && page_->GetTupleSize(slot_id_) > 0 && page_->GetTupleOffset(slot_id_) > 0) {
             RID rid(page_->GetTablePageId(), slot_id_);
             Tuple tuple;
             if (page_->GetTuple(rid, &tuple)) {
