@@ -629,22 +629,13 @@ TablePageIterator TablePageIterator::operator++(int) {
 }
 
 bool TablePageIterator::operator==(const TablePageIterator &other) const {
-    if (page_ == nullptr && other.page_ == nullptr) {
-        return true;
-    }
-    if (page_ != other.page_) {
-        if (page_ == nullptr && other.IsEnd()) {
-            return true;
-        }
-        if (other.page_ == nullptr && IsEnd()) {
-            return true;
-        }
-        return false;
-    }
     if (IsEnd() && other.IsEnd()) {
         return true;
     }
-    return slot_id_ == other.slot_id_;
+    if (IsEnd() || other.IsEnd()) {
+        return false;
+    }
+    return page_ == other.page_ && slot_id_ == other.slot_id_;
 }
 
 bool TablePageIterator::GetTuple(Tuple *tuple) const {
