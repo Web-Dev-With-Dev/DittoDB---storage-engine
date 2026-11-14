@@ -88,20 +88,20 @@ void Page::Unpin()
 
 void Page::WLatch()
 {
-    latch_.lock();
+    latch_.LockExclusive();
 }
 
 void Page::WUnlatch()
 {
-    latch_.unlock();
+    latch_.UnlockExclusive();
 }
 
 void Page::RLatch()
 {
-    latch_.lock_shared();
+    latch_.LockShared();
 }
 
 void Page::RUnlatch()
 {
-    latch_.unlock_shared();
+    latch_.UnlockShared();
 }

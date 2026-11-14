@@ -2,9 +2,62 @@
 
 #include <array>
 #include <atomic>
-#include <shared_mutex>
+#include <condition_variable>
+#include <mutex>
 
 #include "config.h"
+
+/**
+ * @class ReaderWriterLatch
+ * @brief Portable, high-performance Reader-Writer latch with writer preference.
+ *
+ * Implemented using standard C++ std::mutex and std::condition_variable to guarantee
+ * zero torn reads across all platforms (Linux GCC/Clang, Windows MSVC/MinGW) without
+ * relying on buggy winpthreads or reader-starving POSIX rwlock implementations.
+ */
+class ReaderWriterLatch {
+private:
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    int readers_{0};
+    int writers_waiting_{0};
+    bool writer_active_{false};
+
+public:
+    ReaderWriterLatch() = default;
+    ~ReaderWriterLatch() = default;
+
+    ReaderWriterLatch(const ReaderWriterLatch &) = delete;
+    ReaderWriterLatch &operator=(const ReaderWriterLatch &) = delete;
+
+    void LockExclusive() {
+        std::unique_lock<std::mutex> lock(mtx_);
+        ++writers_waiting_;
+        cv_.wait(lock, [this] { return !writer_active_ && readers_ == 0; });
+        --writers_waiting_;
+        writer_active_ = true;
+    }
+
+    void UnlockExclusive() {
+        std::unique_lock<std::mutex> lock(mtx_);
+        writer_active_ = false;
+        cv_.notify_all();
+    }
+
+    void LockShared() {
+        std::unique_lock<std::mutex> lock(mtx_);
+        cv_.wait(lock, [this] { return !writer_active_ && writers_waiting_ == 0; });
+        ++readers_;
+    }
+
+    void UnlockShared() {
+        std::unique_lock<std::mutex> lock(mtx_);
+        --readers_;
+        if (readers_ == 0) {
+            cv_.notify_all();
+        }
+    }
+};
 
 /**
  * @class Page
@@ -13,7 +66,7 @@
  * Each Page contains:
  * - A 4096-byte data payload buffer.
  * - Concurrency control metadata (pin count, dirty flag, page ID).
- * - Read/Write page-level latch (shared mutex on Windows / pthread_rwlock_t on POSIX).
+ * - Read/Write page-level latch (portable ReaderWriterLatch).
  *
  * Latching vs Pinning:
  * - Pinning (Pin/Unpin): Prevents the BufferPoolManager from evicting the page while active.
@@ -24,7 +77,7 @@ private:
     std::atomic<page_id_t> page_id_;
     std::atomic<int> pin_count_;
     std::atomic<bool> is_dirty_;
-    mutable std::shared_mutex latch_;
+    mutable ReaderWriterLatch latch_;
     std::array<char, PAGE_SIZE> data_;
 
 public:
