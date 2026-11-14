@@ -406,14 +406,15 @@ std::vector<page_id_t> TableHeap::GetPageIds() const {
     if (bpm_ == nullptr || first_page_id_ == INVALID_PAGE_ID) {
         return page_ids;
     }
+    std::lock_guard<std::mutex> guard(latch_);
 
     page_id_t cur = first_page_id_;
     while (cur != INVALID_PAGE_ID) {
-        page_ids.push_back(cur);
         Page *raw = bpm_->FetchPage(cur);
         if (raw == nullptr) {
             break;
         }
+        page_ids.push_back(cur);
         const TablePage *tp = TablePage::Cast(raw);
         page_id_t next = tp->GetNextPageId();
         bpm_->UnpinPage(cur, false);
@@ -427,6 +428,7 @@ size_t TableHeap::GetTupleCount() const {
     if (bpm_ == nullptr || first_page_id_ == INVALID_PAGE_ID) {
         return count;
     }
+    std::lock_guard<std::mutex> guard(latch_);
 
     page_id_t cur = first_page_id_;
     while (cur != INVALID_PAGE_ID) {
