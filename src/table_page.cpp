@@ -316,7 +316,7 @@ bool TablePage::InsertTuple(std::span<const char> tuple_bytes, RID *rid) {
 }
 
 bool TablePage::GetTuple(const RID &rid, Tuple *tuple) const {
-    if (rid.GetPageId() != INVALID_PAGE_ID && rid.GetPageId() != GetTablePageId()) {
+    if (rid.GetPageId() == INVALID_PAGE_ID || rid.GetPageId() != GetTablePageId()) {
         return false;
     }
     return GetTuple(GetData(), GetTablePageId(), rid.GetSlotNum(), tuple);
@@ -368,7 +368,7 @@ bool TablePage::GetTuple(const char *data, const RID &rid, Tuple *tuple) {
 }
 
 bool TablePage::UpdateTuple(const Tuple &new_tuple, Tuple *old_tuple, const RID &rid) {
-    if (rid.GetPageId() != INVALID_PAGE_ID && rid.GetPageId() != GetTablePageId()) {
+    if (rid.GetPageId() == INVALID_PAGE_ID || rid.GetPageId() != GetTablePageId()) {
         return false;
     }
     uint32_t slot_id = rid.GetSlotNum();
@@ -447,7 +447,7 @@ bool TablePage::UpdateTuple(const Tuple &new_tuple, const RID &rid) {
 }
 
 bool TablePage::MarkDelete(const RID &rid) {
-    if (rid.GetPageId() != INVALID_PAGE_ID && rid.GetPageId() != GetTablePageId()) {
+    if (rid.GetPageId() == INVALID_PAGE_ID || rid.GetPageId() != GetTablePageId()) {
         return false;
     }
     uint32_t slot_id = rid.GetSlotNum();
@@ -463,7 +463,7 @@ bool TablePage::MarkDelete(const RID &rid) {
 }
 
 bool TablePage::ApplyDelete(const RID &rid) {
-    if (rid.GetPageId() != INVALID_PAGE_ID && rid.GetPageId() != GetTablePageId()) {
+    if (rid.GetPageId() == INVALID_PAGE_ID || rid.GetPageId() != GetTablePageId()) {
         return false;
     }
     uint32_t slot_id = rid.GetSlotNum();
@@ -477,7 +477,7 @@ bool TablePage::ApplyDelete(const RID &rid) {
 }
 
 bool TablePage::RollbackDelete(const RID &rid) {
-    if (rid.GetPageId() != INVALID_PAGE_ID && rid.GetPageId() != GetTablePageId()) {
+    if (rid.GetPageId() == INVALID_PAGE_ID || rid.GetPageId() != GetTablePageId()) {
         return false;
     }
     uint32_t slot_id = rid.GetSlotNum();
