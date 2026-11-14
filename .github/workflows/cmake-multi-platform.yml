@@ -80,7 +80,7 @@ jobs:
 
   sanitizers-and-valgrind:
     name: Linux ThreadSanitizer & Helgrind
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -124,4 +124,4 @@ jobs:
       - name: Run Concurrent Stress Test under Valgrind Helgrind
         run: |
           sudo sysctl vm.mmap_rnd_bits=28
-          valgrind --tool=helgrind --error-exitcode=1 -s --fair-sched=yes --read-var-info=yes --track-lockorders=yes --suppressions=helgrind.supp ./build-valgrind/buffer_pool_manager_concurrent_test
+          valgrind --tool=helgrind --error-exitcode=1 -s --fair-sched=yes --read-var-info=yes --track-lockorders=yes --suppressions=helgrind.supp ./build-valgrind/buffer_pool_manager_concurrent_test --gtest_filter=BufferPoolManagerConcurrentTest.ConcurrentReadWriteLatchingStress

@@ -1,7 +1,6 @@
 #include "table_page.h"
 #include "page.h"
 #include "table_heap.h"
-#include <algorithm>
 
 // ==================== TableIterator Implementation ====================
 
