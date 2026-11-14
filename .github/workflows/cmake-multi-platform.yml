@@ -123,4 +123,5 @@ jobs:
 
       - name: Run Concurrent Stress Test under Valgrind Helgrind
         run: |
-          valgrind --tool=helgrind --error-exitcode=1 -s --read-var-info=yes --track-lockorders=yes --suppressions=helgrind.supp ./build-valgrind/buffer_pool_manager_concurrent_test
+          sudo sysctl vm.mmap_rnd_bits=28
+          valgrind --tool=helgrind --error-exitcode=1 -s --read-var-info=yes --track-lockorders=yes --main-stacksize=16777216 --suppressions=helgrind.supp ./build-valgrind/buffer_pool_manager_concurrent_test
