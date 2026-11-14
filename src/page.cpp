@@ -6,17 +6,9 @@ Page::Page()
       is_dirty_(false)
 {
     ResetMemory();
-#if defined(__unix__) || defined(__APPLE__)
-    pthread_rwlock_init(&latch_, nullptr);
-#endif
 }
 
-Page::~Page()
-{
-#if defined(__unix__) || defined(__APPLE__)
-    pthread_rwlock_destroy(&latch_);
-#endif
-}
+Page::~Page() = default;
 
 // Getters
 
@@ -96,36 +88,20 @@ void Page::Unpin()
 
 void Page::WLatch()
 {
-#if defined(__unix__) || defined(__APPLE__)
-    pthread_rwlock_wrlock(&latch_);
-#else
     latch_.lock();
-#endif
 }
 
 void Page::WUnlatch()
 {
-#if defined(__unix__) || defined(__APPLE__)
-    pthread_rwlock_unlock(&latch_);
-#else
     latch_.unlock();
-#endif
 }
 
 void Page::RLatch()
 {
-#if defined(__unix__) || defined(__APPLE__)
-    pthread_rwlock_rdlock(&latch_);
-#else
     latch_.lock_shared();
-#endif
 }
 
 void Page::RUnlatch()
 {
-#if defined(__unix__) || defined(__APPLE__)
-    pthread_rwlock_unlock(&latch_);
-#else
     latch_.unlock_shared();
-#endif
 }
