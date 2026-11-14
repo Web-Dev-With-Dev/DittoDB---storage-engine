@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstdint>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -9,9 +8,7 @@
 
 #include "buffer_pool_manager.h"
 #include "config.h"
-#include "page.h"
 #include "rid.h"
-#include "table_page.h"
 #include "tuple.h"
 
 class TableHeap;
