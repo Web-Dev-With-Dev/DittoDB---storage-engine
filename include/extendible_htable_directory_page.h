@@ -159,14 +159,12 @@ public:
      * @return uint32_t LSN.
      */
     uint32_t GetLsn() const { return lsn_; }
-    uint32_t GetLSN() const { return lsn_; }
 
     /**
      * @brief Set Log Sequence Number.
      * @param lsn New LSN.
      */
     void SetLsn(uint32_t lsn) { lsn_ = lsn; }
-    void SetLSN(uint32_t lsn) { lsn_ = lsn; }
 
     /**
      * @brief Verifies integrity of directory entries and local depths.
