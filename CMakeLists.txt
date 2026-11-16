@@ -56,6 +56,7 @@ set(COMMON_SOURCES
     src/b_plus_tree_leaf_page.cpp
     src/b_plus_tree_internal_page.cpp
     src/index_iterator.cpp
+    src/generic_key.cpp
     src/b_plus_tree.cpp
 )
 
@@ -73,6 +74,7 @@ set(COMMON_HEADERS
     include/extendible_htable_bucket_page.h
     include/extendible_hash_table.h
     include/common_page_header.h
+    include/generic_key.h
     include/b_plus_tree_page.h
     include/b_plus_tree_header_page.h
     include/b_plus_tree_internal_page.h
