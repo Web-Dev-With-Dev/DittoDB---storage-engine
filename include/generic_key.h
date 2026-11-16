@@ -302,9 +302,7 @@ public:
     /**
      * @brief Construct a zero-initialized GenericKey.
      */
-    GenericKey() {
-        data_.fill(0);
-    }
+    GenericKey() = default;
 
     /**
      * @brief Construct GenericKey from raw bytes.
@@ -403,7 +401,7 @@ public:
     }
 
 private:
-    std::array<char, KeySize> data_;
+    std::array<char, KeySize> data_{};
 };
 
 static_assert(std::is_standard_layout_v<GenericKey<8>>, "GenericKey must satisfy standard layout");
