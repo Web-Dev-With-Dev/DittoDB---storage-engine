@@ -164,4 +164,4 @@ private:
     size_t GetKthAccessTime(frame_id_t frame_id) const;
 
     mutable std::mutex replacer_latch_;
-};
+};

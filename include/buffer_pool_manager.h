@@ -231,4 +231,3 @@ private:
     mutable std::atomic<size_t> evict_count_{0};
     mutable std::atomic<size_t> unpin_count_{0};
 };
-
